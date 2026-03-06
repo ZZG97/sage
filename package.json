@@ -1,18 +1,29 @@
 {
   "name": "sage",
-  "module": "index.ts",
+  "version": "1.0.0",
+  "description": "个人内部AI助手，通过飞书交互，集成OpenCode AI能力",
+  "module": "src/index.ts",
   "type": "module",
   "private": true,
-  "devDependencies": {
-    "@types/bun": "latest"
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "start": "bun run src/index.ts",
+    "build": "bun build src/index.ts --outdir=dist",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo 'Linting...' && exit 0"
   },
-  "peerDependencies": {
-    "typescript": "^5"
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "@opencode-ai/sdk": "^1.2.20",
     "dotenv": "^17.3.1",
     "hono": "^4.12.5"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
   }
 }

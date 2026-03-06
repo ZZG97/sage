@@ -111,10 +111,10 @@ const eventDispatcher = new Lark.EventDispatcher({})
      * 注册连接事件，监听长连接状态。
      * Register connection event to monitor long connection status.
      */
-    'connection': async (data) => {
+    'connection': async (data: any) => {
       console.log('长连接状态变更:', data);
     },
-  });
+  } as any);
 
 /**
  * 启动长连接，并注册事件处理器。
@@ -147,7 +147,7 @@ console.log('按 Ctrl+C 停止服务');
 process.on('SIGINT', async () => {
   console.log('\n正在关闭长连接...');
   try {
-    wsClient.stop();
+    (wsClient as any).stop?.();
     console.log('长连接已关闭');
   } catch (error) {
     console.error('关闭长连接失败:', error);
