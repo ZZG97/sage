@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.59.0",
+    "@opencode-ai/sdk": "^1.2.20",
     "dotenv": "^17.3.1",
     "hono": "^4.12.5"
   }
