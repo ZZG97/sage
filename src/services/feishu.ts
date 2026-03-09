@@ -113,16 +113,16 @@ export class FeishuService {
     try {
       if (message.chat_type === 'p2p') {
         // 单聊
-        await this.client.im.v1.message.create({
-          params: {
-            receive_id_type: 'chat_id',
-          },
-          data: {
-            receive_id: message.chat_id,
-            content: JSON.stringify({ text: responseText }),
-            msg_type: 'text',
-          },
-        });
+        await this.client.im.v1.message.reply({
+            path: {
+              message_id: message.message_id, // 要回复的消息 ID。 Message ID to reply.
+            },
+            data: {
+              content: JSON.stringify({ text: responseText }),
+              msg_type: 'text', // 设置消息类型为文本消息。 Set message type to text message.
+              reply_in_thread: true, // 在线程中回复。 Reply in thread.
+            },
+          });
         this.logger.info('单聊回复发送成功');
       } else {
         // 群聊

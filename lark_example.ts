@@ -10,9 +10,9 @@ dotenv.config();
  */
 const baseConfig = {
   // 应用的 AppID, 你可以在开发者后台获取。 AppID of the application, you can get it in the developer console.
-  appId: process.env.APP_ID || '',
+  appId: process.env.FEISHU_APP_ID || '',
   // 应用的 AppSecret，你可以在开发者后台获取。 AppSecret of the application, you can get it in the developer console.
-  appSecret: process.env.APP_SECRET || '',
+  appSecret: process.env.FEISHU_APP_SECRET || '',
   // 请求域名，如： `https://open.feishu.cn。`  Request domain name, such as `https://open.feishu.cn.` 
   domain: process.env.BASE_DOMAIN || 'https://open.feishu.cn',
 };
@@ -69,18 +69,30 @@ const eventDispatcher = new Lark.EventDispatcher({})
            * https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/create 
            */
           console.log('处理单聊消息');
-          await client.im.v1.message.create({
-            params: {
-              receive_id_type: 'chat_id', // 消息接收者的 ID 类型，设置为会话ID。 ID type of the message receiver, set to chat ID.
+          await client.im.v1.message.reply({
+            path: {
+              message_id: message_id, // 要回复的消息 ID。 Message ID to reply.
             },
             data: {
-              receive_id: chat_id, // 消息接收者的 ID 为消息发送的会话ID。 ID of the message receiver is the chat ID of the message sending.
               content: JSON.stringify({ 
                 text: `收到你发送的消息: ${responseText}\nReceived message: ${responseText}` 
               }),
               msg_type: 'text', // 设置消息类型为文本消息。 Set message type to text message.
+              reply_in_thread: true, // 在线程中回复。 Reply in thread.
             },
           });
+          // await client.im.v1.message.create({
+          //   params: {
+          //     receive_id_type: 'chat_id', // 消息接收者的 ID 类型，设置为会话ID。 ID type of the message receiver, set to chat ID.
+          //   },
+          //   data: {
+          //     receive_id: chat_id, // 消息接收者的 ID 为消息发送的会话ID。 ID of the message receiver is the chat ID of the message sending.
+          //     content: JSON.stringify({ 
+          //       text: `收到你发送的消息: ${responseText}\nReceived message: ${responseText}` 
+          //     }),
+          //     msg_type: 'text', // 设置消息类型为文本消息。 Set message type to text message.
+          //   },
+          // });
           console.log('单聊回复发送成功');
         } else {
           /**
