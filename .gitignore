@@ -34,3 +34,5 @@ nohup.out
 
 # Finder (MacOS) folder config
 .DS_Store
+
+data
