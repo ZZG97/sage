@@ -10,188 +10,194 @@
 |------|------|------|
 | 运行时 | Bun | 原生 TypeScript，性能好 |
 | Web 框架 | Hono | 轻量、类型安全 |
-| 任务队列 | BunQueue | Bun 原生 |
+| 存储 | bun:sqlite | 内置零依赖，消息流水存储 |
+| 文件存储 | Markdown | 长期/中期记忆，可读可编辑 |
 
 ## 核心特性
 
 1. **飞书接入** - 通过飞书机器人接收和发送消息
 2. **Agent 能力** - 基于 OpenCode SDK 实现智能对话
-3. **上下文记忆** - 记住对话历史和个人偏好
-4. **定时任务** - 主动触发提醒和任务
-5. **Skills 进化** - 支持技能扩展和自我进化
+3. **三级记忆** - 短期(Thread上下文) + 中期(摘要) + 长期(用户记忆)
+4. **Skill 系统** - 可扩展的技能框架
+5. **定时任务** - 主动触发提醒和任务
 
 ---
 
-## 【已开发内容】
+## 已完成
 
-### 🏗️ 项目架构 (已完成)
-- **模块化设计**: 采用清晰的分层架构，包含services、types、utils、config等模块
-- **类型安全**: 完整的TypeScript类型定义，确保代码质量和可维护性
-- **工程规范**: 遵循现代Node.js项目最佳实践
+### 基础架构
 
-### 🔧 核心服务实现 (已完成)
+- 模块化分层设计（services / types / utils / config）
+- 完整 TypeScript 类型定义
+- 环境变量配置与验证
+- 自定义错误类（AppError）+ 全局错误处理
+- 结构化日志系统（多级别、上下文标签）
+- 异步重试机制
 
-#### 1. 飞书服务 (FeishuService)
-- ✅ WebSocket长连接，实时接收消息事件
-- ✅ 消息内容解析（支持文本消息）
-- ✅ 智能回复（区分单聊和群聊场景）
-- ✅ 消息去重机制（基于事件ID）
-- ✅ 错误处理和重试机制
+### 飞书服务 (FeishuService)
 
-#### 2. OpenCode服务 (OpenCodeService)
-- ✅ AI会话管理（创建、获取、删除会话）
-- ✅ 智能对话（发送消息到OpenCode并接收回复）
-- ✅ 响应解析（从复杂的JSON响应中提取纯文本）
-- ✅ 会话过期清理机制
-- ✅ 健康检查功能
+- WebSocket 长连接，实时接收消息事件
+- 消息内容解析（文本消息）
+- 消息去重机制（基于事件 ID）
+- 发送者身份提取（open_id）
+- Thread 上下文提取（thread_id）
+- 统一以话题形式回复（reply_in_thread）
+- message_id → thread_id 映射记录
 
-#### 3. 核心桥接逻辑 (SageCore)
-- ✅ 飞书与OpenCode的无缝集成
-- ✅ 消息预处理和回复后处理
-- ✅ 用户会话管理（每个用户独立的AI会话）
-- ✅ 定时任务调度（会话清理等）
-- ✅ 服务状态监控
+### OpenCode 服务 (OpenCodeService)
 
-#### 4. Web服务 (WebServer)
-- ✅ RESTful API接口（/health, /status, /cleanup等）
-- ✅ CORS跨域支持
-- ✅ 请求日志记录
-- ✅ 统一的错误处理
-- ✅ 优雅的错误响应格式
+- AI 会话管理（创建、获取、删除）
+- 智能对话（发送消息并接收回复）
+- 响应解析（多格式兼容）
+- 会话过期清理机制
+- 健康检查
 
-### 🛠️ 技术特性 (已完成)
+### 核心逻辑 (SageCore)
 
-#### 配置管理
-- ✅ 环境变量配置（支持开发/生产环境）
-- ✅ 配置验证（确保必要配置项存在）
-- ✅ 敏感信息安全管理
+- Thread 隔离的会话管理（每个 thread 独立 OpenCode 会话）
+- 用户身份识别（基于 open_id）
+- MessageContext 完整上下文传递
+- 斜杠命令系统：/thread_id、/clear、/help
+- 定时清理过期 thread 会话
 
-#### 错误处理
-- ✅ 自定义错误类（AppError）
-- ✅ 错误分类和状态码管理
-- ✅ 全局错误处理中间件
-- ✅ 友好的错误信息返回
+### Web 服务 (WebServer)
 
-#### 日志系统
-- ✅ 结构化日志记录
-- ✅ 多级别日志（info, warn, error, debug）
-- ✅ 上下文相关的日志标签
-- ✅ 开发/生产环境适配
+- RESTful API：/health、/status、/cleanup、/test/message
+- CORS 跨域支持
+- Hono + Bun.serve()
 
-#### 工具函数
-- ✅ 异步重试机制
-- ✅ 日志工具类
-- ✅ 错误处理工具
-- ✅ 类型安全工具
+### 项目结构
 
-### 📁 项目结构
 ```
 src/
 ├── config/          # 配置管理
 ├── services/        # 服务层
-│   ├── core.ts      # 核心应用逻辑
-│   ├── feishu.ts    # 飞书服务
+│   ├── core.ts      # 核心应用逻辑（Thread隔离 + 斜杠命令）
+│   ├── feishu.ts    # 飞书服务（WebSocket + 消息上下文提取）
 │   ├── opencode.ts  # OpenCode服务
 │   └── web.ts       # Web服务
-├── types/           # 类型定义
+├── types/           # 类型定义（含 MessageContext）
 ├── utils/           # 工具函数
 └── index.ts         # 应用入口
 ```
 
-### 🚀 运行状态
-- ✅ 类型检查通过（TypeScript编译无错误）
-- ✅ 服务可正常启动
-- ✅ WebSocket连接成功
-- ✅ API接口可用
-- ✅ 飞书消息接收正常
-- ✅ OpenCode集成正常
-
-### 📋 API接口
-- `GET /health` - 健康检查
-- `GET /status` - 服务状态
-- `POST /cleanup` - 清理过期会话
-- `POST /test/message` - 测试消息
-- `POST /feishu/webhook` - 飞书Webhook（备用）
-
-### 🔍 监控指标
-- 服务运行状态
-- 活跃会话数量
-- 用户数量统计
-- 消息处理统计
-
 ---
-
-## 计划
-
-### 🎯 近期目标
-1. **消息持久化** - 将对话历史保存到数据库
-2. **用户识别** - 基于飞书用户ID的个性化服务
-3. **技能系统** - 可扩展的技能框架
-4. **定时任务** - 主动触发提醒和任务
-
-### 🔮 长期规划
-1. **多模态支持** - 支持图片、文件等消息类型
-2. **工作流集成** - 集成内部系统和工具
-3. **机器学习** - 基于使用数据自我优化
-4. **多平台支持** - 扩展到企业微信、钉钉等平台
 
 ## 当前需求
 
-### 🎯 THREAD隔离机制
+### 第一步：消息流水存储（SQLite）
 
-1. THREAD基本概念
+用 `bun:sqlite` 持久化每条对话记录，为中期记忆和 skill 查询提供数据基础。
 
-- 每条新消息创建独立的THREAD上下文
-- 在THREAD中回复的消息保持该THREAD的上下文连续性
-- 不同THREAD之间完全隔离，不共享上下文
-2. 用户身份识别
+```sql
+messages:
+  id            INTEGER PRIMARY KEY AUTOINCREMENT
+  thread_id     TEXT        -- omt_xxx 或 msg:xxx
+  open_id       TEXT        -- 发送者
+  role          TEXT        -- user / assistant
+  content       TEXT        -- 消息内容
+  created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+```
 
-- 使用飞书的 open_id 作为用户标识
-- 正确识别和处理不同用户的身份
+- 在 SageCore 中，每次用户发消息和 AI 回复后，写入 messages 表
+- 数据库文件存放在 `data/sage.db`
 
-### 斜杠命令系统
-/thread_id  回复当前THREAD ID 、 /clear 清空thread上下文、 /help
+### 第二步：Skill 系统框架
 
-### 📱 飞书中的THREAD是什么？
-THREAD是飞书消息系统中的一个核心概念，类似于"话题分支"或"对话线程"：
+可扩展的技能框架，后续记忆功能都建立在 skill 之上。
 
-类比理解 ：
+- 定义 Skill 接口（名称、描述、触发方式、执行逻辑）
+- Skill 注册和调度机制
+- 斜杠命令作为 skill 的触发方式之一
+- 现有的 /thread_id、/clear、/help 迁移为内置 skill
 
-- 就像微信群里的"引用回复"功能
-- 就像论坛里的"帖子回复"形成独立的讨论分支
-- 就像GitHub issue中的评论线程
-### 🎯 THREAD的核心特征
-1. 消息层级关系
+### 第三步：长期记忆（memory.md）— 基于 Skill
+
+通过 skill 实现用户记忆管理，文件存储，可读可编辑。
 
 ```
-主对话（Chat）
-├── 消息A
-│   └── THREAD_A（基于消息A的回复）
-│       ├── 回复1
-│       ├── 回复2
-│       └── 回复3
-├── 消息B
-│   └── THREAD_B（基于消息B的回复）
-│       ├── 回复4
-│       └── 回复5
-└── 消息C（新消息，没有THREAD）
+data/memories/{open_id}/memory.md
 ```
-2. 独立上下文
 
-- 每个THREAD有独立的对话历史
-- THREAD内的回复共享该THREAD的上下文
-- 不同THREAD之间完全隔离
+文件内容按主题分块（Markdown），AI 负责组织和更新：
 
+```markdown
+## 偏好
+- 偏好简洁回复
+- 开发用 Bun + TypeScript
 
-### 话题 ID 说明
+## 工作
+- 周三固定有例会
+- 负责 Sage 项目
+```
 
-话题拥有在当前租户内唯一的 ID（即 thread_id）。thread_id 的格式是以 omt_ 开头的字符串，例如：omt_d4be107c616a。使用话题 ID 可实现：
+**Skill：**
+- `remember` — `/remember <内容>`，AI 读取现有内容 → 整体重组织 → 覆盖写入（智能去重和更新）
+- `forget` — `/forget <关键词>`，AI 从文件中移除相关内容
+- `memories` — `/memories`，显示当前所有记忆
+- AI 也可在对话中主动建议"要我记住吗？"，用户确认后触发 remember skill
 
-调用转发话题、获取话题历史消息等接口。
-判断是否为话题（所查询的消息如果不返回 thread_id 值，则说明该消息为非话题消息）。
-如何获取 thread_id
-方式一：在话题形式群中，调用发送消息、回复消息、转发消息等接口，从响应的结果中获取 thread_id 参数值。
+**更新原则：** memory.md 的每次修改都要经过用户意愿，不能自动写入。
 
-方式二：在消息形式群中，调用回复消息接口，传入 "reply_in_thread": "true" 参数值（即以话题形式进行回复）， 从响应的结果中获取 thread_id 参数值。
+**使用方式：** 每次对话前读取 memory.md，注入给 AI 作为上下文前缀。
 
-方式三：监听接收消息事件，若消息为话题消息，可从事件体中获得话题消息的 thread_id。
+### 第四步：中期记忆（summaries）— 基于 Skill
+
+通过 skill 实现 Thread 摘要的生成和管理。
+
+**文件结构：**
+
+```
+data/memories/{open_id}/
+├── recent_summaries.md    -- 最近50条摘要（每次对话必定注入）
+└── summaries/
+    ├── 2026-03.md         -- 历史归档
+    ├── 2026-04.md
+    └── ...
+```
+
+**Skill：**
+- `summarize` — 生成/更新当前 thread 的摘要，写入 recent_summaries.md
+  - 自动触发：每轮对话结束后异步执行
+  - 手动触发：`/summary`
+- `search_history` — 从 SQLite 按 thread_id 查询完整对话明细
+  - AI 从 recent_summaries.md 看到索引，判断需要详情时自动调用
+
+**滚动机制：**
+- 新摘要写入 recent_summaries.md 顶部
+- 超过 50 条时，最旧的移入对应月份的归档文件（summaries/YYYY-MM.md）
+- 每次对话只注入 recent_summaries.md，历史归档通过 skill 按需查
+
+**摘要格式：**
+
+```markdown
+## 2026-03-10 omt_abc123
+讨论了 Redis 缓存方案，决定用 Bun.redis，TTL 设为 1 小时。
+
+## 2026-03-11 omt_def456
+排查了飞书 WebSocket 断连问题，原因是心跳超时，已修复。
+```
+
+---
+
+## 三级记忆体系
+
+```
+短期：OpenCode 会话内存（Thread 内实时上下文）
+中期：recent_summaries.md（最近 50 条 Thread 摘要，每次注入）
+长期：memory.md（用户偏好和事实，每次注入）
+流水：SQLite messages 表（原始对话记录，通过 skill 按需查询）
+归档：summaries/YYYY-MM.md（历史摘要，通过 skill 按需查询）
+```
+
+核心原则：**文件管"知识"，数据库管"数据"。**
+
+---
+
+## 远期规划
+
+1. **更多 Skill** — 查内部系统、调外部 API、执行脚本
+2. **定时任务** — AI 主动推送提醒、监控异常、定期汇报
+3. **多模态** — 支持图片、文件消息，回复用飞书卡片消息
+4. **工作流集成** — 接入内部系统和工具链
+5. **多平台** — 扩展到企业微信、钉钉等
