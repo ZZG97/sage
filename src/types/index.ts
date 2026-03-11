@@ -13,11 +13,32 @@ export interface FeishuMessage {
     message_type: string;
     chat_type: 'p2p' | 'group';
     message_id: string;
+    thread_id?: string; // 话题ID，omt_ 开头
+    root_id?: string; // 根消息ID（回复场景）
+    parent_id?: string; // 父消息ID（回复场景）
+  };
+  sender?: {
+    sender_id?: {
+      open_id?: string;
+      user_id?: string;
+      union_id?: string;
+    };
+    sender_type?: string;
   };
 }
 
 export interface FeishuTextContent {
   text: string;
+}
+
+// 消息上下文 - 传递给消息处理器的完整上下文
+export interface MessageContext {
+  text: string; // 消息文本内容
+  openId: string; // 发送者的 open_id
+  chatId: string; // 聊天ID
+  messageId: string; // 消息ID
+  chatType: 'p2p' | 'group'; // 聊天类型
+  threadId?: string; // 话题ID（如果在话题中回复）
 }
 
 // OpenCode 相关类型
@@ -37,7 +58,6 @@ export interface OpenCodePromptRequest {
 export interface OpenCodePromptResponse {
   data?: {
     response?: string;
-    // 根据实际API响应结构定义
   };
 }
 

@@ -1,5 +1,5 @@
 import * as Lark from '@larksuiteoapi/node-sdk';
-import { BaseConfig, FeishuMessage, FeishuTextContent, MessageHandlerResult } from '../types';
+import { BaseConfig, FeishuMessage, FeishuTextContent, MessageContext } from '../types';
 import { Logger, AppError } from '../utils';
 
 export class FeishuService {
@@ -7,13 +7,14 @@ export class FeishuService {
   private wsClient: Lark.WSClient;
   private eventDispatcher: Lark.EventDispatcher;
   private logger: Logger;
-  private messageHandler?: (message: string) => Promise<string>;
+  private messageHandler?: (ctx: MessageContext) => Promise<string>;
   private processedMessages: Set<string> = new Set(); // 消息去重
-  private messageTimeout = 5 * 60 * 1000; // 5分钟超时
+  // 记录 message_id -> thread_id 的映射（当新消息回复后产生 thread）
+  private messageThreadMap: Map<string, string> = new Map();
 
   constructor(config: BaseConfig) {
     this.logger = new Logger('FeishuService');
-    
+
     this.client = new Lark.Client({
       appId: config.appId,
       appSecret: config.appSecret,
@@ -31,7 +32,7 @@ export class FeishuService {
   }
 
   // 设置消息处理器
-  setMessageHandler(handler: (message: string) => Promise<string>) {
+  setMessageHandler(handler: (ctx: MessageContext) => Promise<string>) {
     this.messageHandler = handler;
   }
 
@@ -52,7 +53,7 @@ export class FeishuService {
 
   // 处理接收到的消息
   private async handleMessage(data: FeishuMessage): Promise<void> {
-    const { message, event_id } = data as any;
+    const { message, sender, event_id } = data as any;
     this.logger.info('收到消息事件:', JSON.stringify(data, null, 2));
 
     try {
@@ -69,22 +70,38 @@ export class FeishuService {
         return;
       }
 
-      this.logger.info(`用户消息内容: ${messageText}`);
+      // 提取发送者 open_id
+      const openId = sender?.sender_id?.open_id || 'unknown';
+
+      // 提取 thread_id
+      const threadId = message.thread_id || undefined;
+
+      this.logger.info(`用户消息: text="${messageText}", openId=${openId}, threadId=${threadId || '无'}, messageId=${message.message_id}`);
+
+      // 构建消息上下文
+      const ctx: MessageContext = {
+        text: messageText,
+        openId,
+        chatId: message.chat_id,
+        messageId: message.message_id,
+        chatType: message.chat_type,
+        threadId,
+      };
 
       // 如果没有设置消息处理器，使用默认回复
       let responseText: string;
       if (this.messageHandler) {
-        responseText = await this.messageHandler(messageText);
+        responseText = await this.messageHandler(ctx);
       } else {
         responseText = `收到你发送的消息: ${messageText}`;
       }
 
-      // 发送回复
+      // 发送回复并获取回复中的 thread_id
       await this.sendReply(message, responseText);
-      
+
     } catch (error) {
       this.logger.error('处理消息失败:', error);
-      
+
       // 发送错误回复
       try {
         await this.sendReply(message, '抱歉，处理消息时出现错误，请稍后再试');
@@ -111,32 +128,26 @@ export class FeishuService {
   // 发送回复消息
   private async sendReply(message: FeishuMessage['message'], responseText: string): Promise<void> {
     try {
-      if (message.chat_type === 'p2p') {
-        // 单聊
-        await this.client.im.v1.message.reply({
-            path: {
-              message_id: message.message_id, // 要回复的消息 ID。 Message ID to reply.
-            },
-            data: {
-              content: JSON.stringify({ text: responseText }),
-              msg_type: 'text', // 设置消息类型为文本消息。 Set message type to text message.
-              reply_in_thread: true, // 在线程中回复。 Reply in thread.
-            },
-          });
-        this.logger.info('单聊回复发送成功');
-      } else {
-        // 群聊
-        await this.client.im.v1.message.reply({
-          path: {
-            message_id: message.message_id,
-          },
-          data: {
-            content: JSON.stringify({ text: responseText }),
-            msg_type: 'text',
-          },
-        });
-        this.logger.info('群聊回复发送成功');
+      // 统一以话题形式回复，确保 thread 上下文隔离
+      const response = await this.client.im.v1.message.reply({
+        path: {
+          message_id: message.message_id,
+        },
+        data: {
+          content: JSON.stringify({ text: responseText }),
+          msg_type: 'text',
+          reply_in_thread: true,
+        },
+      });
+
+      // 从回复响应中提取 thread_id，保存映射关系
+      const replyData = response?.data as any;
+      if (replyData?.thread_id) {
+        this.messageThreadMap.set(message.message_id, replyData.thread_id);
+        this.logger.info(`记录 thread 映射: ${message.message_id} -> ${replyData.thread_id}`);
       }
+
+      this.logger.info(`回复发送成功 (chat_type: ${message.chat_type})`);
     } catch (error) {
       throw new AppError('发送回复消息失败', 'SEND_REPLY_FAILED');
     }
@@ -161,6 +172,11 @@ export class FeishuService {
     }
   }
 
+  // 获取 message_id 对应的 thread_id
+  getThreadIdByMessageId(messageId: string): string | undefined {
+    return this.messageThreadMap.get(messageId);
+  }
+
   // 启动WebSocket连接
   async start(): Promise<void> {
     try {
@@ -176,7 +192,6 @@ export class FeishuService {
   async stop(): Promise<void> {
     try {
       this.logger.info('正在停止飞书服务...');
-      // 注意：WebSocket客户端的停止方法可能需要根据实际SDK调整
       (this.wsClient as any).stop?.();
       this.logger.info('飞书服务已停止');
     } catch (error) {
@@ -214,10 +229,8 @@ export class FeishuService {
       return true;
     }
 
-    // 添加到已处理消息集合
     this.processedMessages.add(eventId);
 
-    // 定期清理过期的消息ID（防止内存泄漏）
     if (this.processedMessages.size > 1000) {
       this.cleanupProcessedMessages();
     }
@@ -227,13 +240,20 @@ export class FeishuService {
 
   // 清理过期的已处理消息
   private cleanupProcessedMessages(): void {
-    // 这里可以添加更复杂的清理逻辑，比如基于时间的清理
-    // 目前简单限制集合大小
     const entries = Array.from(this.processedMessages.entries());
-    const toKeep = entries.slice(-500); // 保留最近500个
+    const toKeep = entries.slice(-500);
     this.processedMessages.clear();
     toKeep.forEach(([eventId]) => this.processedMessages.add(eventId));
-    
+
     this.logger.info(`清理已处理消息，保留最近 ${toKeep.length} 个`);
+
+    // 同时清理过旧的 thread 映射
+    if (this.messageThreadMap.size > 1000) {
+      const threadEntries = Array.from(this.messageThreadMap.entries());
+      const threadToKeep = threadEntries.slice(-500);
+      this.messageThreadMap.clear();
+      threadToKeep.forEach(([k, v]) => this.messageThreadMap.set(k, v));
+      this.logger.info(`清理 thread 映射，保留最近 ${threadToKeep.length} 个`);
+    }
   }
 }
