@@ -39,6 +39,7 @@ export interface MessageContext {
   messageId: string; // 消息ID
   chatType: 'p2p' | 'group'; // 聊天类型
   threadId?: string; // 话题ID（如果在话题中回复）
+  rootId?: string; // 根消息ID（话题的第一条消息）
 }
 
 // OpenCode 相关类型

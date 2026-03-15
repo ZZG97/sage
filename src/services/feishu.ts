@@ -8,6 +8,7 @@ export class FeishuService {
   private eventDispatcher: Lark.EventDispatcher;
   private logger: Logger;
   private messageHandler?: (ctx: MessageContext) => Promise<string>;
+  private threadCreatedHandler?: (messageId: string, threadId: string) => void;
   private processedMessages: Set<string> = new Set(); // 消息去重
   // 记录 message_id -> thread_id 的映射（当新消息回复后产生 thread）
   private messageThreadMap: Map<string, string> = new Map();
@@ -34,6 +35,11 @@ export class FeishuService {
   // 设置消息处理器
   setMessageHandler(handler: (ctx: MessageContext) => Promise<string>) {
     this.messageHandler = handler;
+  }
+
+  // 设置 thread 创建回调（回复后飞书产生 thread_id 时通知调用方）
+  setThreadCreatedHandler(handler: (messageId: string, threadId: string) => void) {
+    this.threadCreatedHandler = handler;
   }
 
   // 设置事件处理器
@@ -86,6 +92,7 @@ export class FeishuService {
         messageId: message.message_id,
         chatType: message.chat_type,
         threadId,
+        rootId: message.root_id || undefined,
       };
 
       // 如果没有设置消息处理器，使用默认回复
@@ -145,6 +152,8 @@ export class FeishuService {
       if (replyData?.thread_id) {
         this.messageThreadMap.set(message.message_id, replyData.thread_id);
         this.logger.info(`记录 thread 映射: ${message.message_id} -> ${replyData.thread_id}`);
+        // 通知调用方，让 SageCore 迁移 session
+        this.threadCreatedHandler?.(message.message_id, replyData.thread_id);
       }
 
       this.logger.info(`回复发送成功 (chat_type: ${message.chat_type})`);

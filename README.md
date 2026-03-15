@@ -1,80 +1,116 @@
 # Sage AI Assistant
 
-一个个人内部AI助手，通过飞书交互，集成OpenCode AI能力，支持智能对话和任务处理。
+一个个人 AI 助手，通过飞书交互，支持多 Agent 后端（Claude Code / OpenCode），可执行代码、操作浏览器、完成各种任务。
 
 ## 功能特性
 
 - **飞书集成** - 通过飞书机器人接收和发送消息
-- **AI对话** - 基于OpenCode SDK实现智能对话
-- **上下文记忆** - 支持会话管理和上下文保持
-- **Web服务** - 提供RESTful API接口
-- **健康监控** - 服务状态监控和健康管理
+- **多 Agent 后端** - 可插拔的 Agent 层，支持 Claude Code、OpenCode，可扩展
+- **上下文隔离** - 基于飞书话题的会话隔离，互不干扰
+- **Web服务** - 提供 RESTful API 接口（健康检查、状态查看、会话清理）
 - **优雅关闭** - 支持优雅的服务启停
 
-## 技术栈
+## 架构
 
-| 层级 | 技术 | 说明 |
-|------|------|------|
-| 运行时 | Bun | 原生 TypeScript，性能好 |
-| Web 框架 | Hono | 轻量、类型安全 |
-| 飞书SDK | @larksuiteoapi/node-sdk | 官方SDK |
-| AI能力 | @opencode-ai/sdk | OpenCode AI服务 |
+```
+飞书用户 ──WebSocket──▶ FeishuService ──▶ SageCore ──▶ AgentProvider ──▶ AI 后端
+                                            │
+                                     ┌──────┴──────┐
+                                     │ 可插拔接口   │
+                                     ├─────────────┤
+                                     │ Claude Code │  ← CLI subprocess
+                                     │ OpenCode    │  ← HTTP SDK
+                                     │ (自定义)     │  ← 实现 AgentProvider 接口
+                                     └─────────────┘
+```
 
 ## 项目结构
 
 ```
 src/
-├── config/          # 配置管理
+├── agent/               # Agent 抽象层
+│   ├── types.ts         # AgentProvider 接口定义
+│   ├── claude-code-provider.ts  # Claude Code 实现
+│   ├── opencode-provider.ts     # OpenCode 实现
+│   └── index.ts         # 工厂函数
+├── config/              # 配置管理
 │   └── index.ts
-├── services/        # 服务层
-│   ├── core.ts      # 核心应用逻辑
-│   ├── feishu.ts    # 飞书服务
-│   ├── opencode.ts  # OpenCode服务
-│   ├── web.ts       # Web服务
-│   └── index.ts     # 服务导出
-├── types/           # 类型定义
+├── services/            # 服务层
+│   ├── core.ts          # SageCore 核心逻辑
+│   ├── feishu.ts        # 飞书服务
+│   ├── web.ts           # Web 服务
 │   └── index.ts
-├── utils/           # 工具函数
+├── types/               # 类型定义
 │   └── index.ts
-└── index.ts         # 应用入口
+├── utils/               # 工具函数
+│   └── index.ts
+└── index.ts             # 应用入口
 ```
 
 ## 快速开始
 
-### 环境要求
+### 1. 安装环境
 
-- Bun 1.0+
+**安装 Bun**（macOS / Linux）：
+```bash
+curl -fsSL https://bun.sh/install | bash
+```
+
+安装完成后重新加载 shell：
+```bash
+exec $SHELL
+```
+
+验证安装：
+```bash
+bun --version  # 需要 1.0+
+```
+
+**其他依赖**：
 - 飞书开发者账号和应用
-- OpenCode服务
+- Agent 后端（二选一）：
+  - **Claude Code**：`npm install -g @anthropic-ai/claude-code`，需要 Anthropic API key
+  - **OpenCode**：`curl -fsSL https://opencode.ai/install | bash`
 
-### 安装依赖
+### 2. 安装项目依赖
 
 ```bash
+cd sage
 bun install
 ```
 
-### 配置环境变量
+### 3. 配置环境变量
 
-1. 复制环境变量文件：
 ```bash
 cp .env.example .env
 ```
 
-2. 编辑 `.env` 文件，填入必要的配置：
+编辑 `.env`：
+
 ```env
-# 飞书配置
+# === 飞书配置（必填）===
 FEISHU_APP_ID=your_app_id_here
 FEISHU_APP_SECRET=your_app_secret_here
 
-# OpenCode配置
+# === Agent 后端选择 ===
+# 'opencode' 或 'claude-code'
+AGENT_PROVIDER=claude-code
+
+# --- OpenCode 配置（AGENT_PROVIDER=opencode 时）---
 OPENCODE_BASE_URL=http://127.0.0.1:4111
 
-# 服务器配置
+# --- Claude Code 配置（AGENT_PROVIDER=claude-code 时）---
+CLAUDE_CODE_WORK_DIR=/path/to/your/workspace
+CLAUDE_CODE_MAX_TURNS=25
+CLAUDE_CODE_MODEL=sonnet
+# CLAUDE_CODE_ALLOWED_TOOLS=Read,Bash,Edit,Grep,Glob,WebSearch,WebFetch
+
+# === 服务器配置 ===
 PORT=3000
 HOST=0.0.0.0
 ```
 
-### 运行项目
+### 4. 运行
 
 ```bash
 # 开发模式
@@ -121,17 +157,21 @@ Content-Type: application/json
    - 发送消息
    - 读取消息
 
-## OpenCode配置
-
-确保OpenCode服务正在运行，并配置正确的基础URL。
-
 ## 开发指南
 
-### 添加新功能
+### 添加新的 Agent Provider
 
-1. 在 `services/` 目录下创建新的服务模块
-2. 在 `types/` 目录下定义相关类型
-3. 在核心逻辑中集成新功能
+实现 `AgentProvider` 接口（`src/agent/types.ts`），然后在 `src/agent/index.ts` 的工厂函数中注册即可：
+
+```typescript
+// src/agent/my-provider.ts
+import { AgentProvider, AgentSession, AgentResponse } from './types';
+
+export class MyProvider implements AgentProvider {
+  readonly name = 'my-provider';
+  // ... 实现接口方法
+}
+```
 
 ### 错误处理
 

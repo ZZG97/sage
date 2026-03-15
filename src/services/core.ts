@@ -1,34 +1,44 @@
 import { FeishuService } from './feishu';
-import { OpenCodeService } from './opencode';
+import { AgentProvider } from '../agent';
 import { Logger, AppError } from '../utils';
 import { appConfig } from '../config';
 import { MessageContext } from '../types';
 
 // Thread 会话信息
 interface ThreadSession {
-  sessionId: string; // OpenCode 会话ID
+  sessionId: string; // Agent 会话ID
   openId: string; // 创建者的 open_id
-  createdAt: number; // 创建时间
-  lastActiveAt: number; // 最后活跃时间
+  createdAt: number;
+  lastActiveAt: number;
 }
 
 export class SageCore {
   private feishuService: FeishuService;
-  private opencodeService: OpenCodeService;
+  private agent: AgentProvider;
   private logger: Logger;
   private isRunning: boolean = false;
 
   // Thread 隔离的会话管理
-  // key: thread_id (omt_xxx) 或 message_id (用于新消息尚无 thread 的情况)
   private threadSessions: Map<string, ThreadSession> = new Map();
 
-  constructor() {
+  constructor(agent: AgentProvider) {
     this.logger = new Logger('SageCore');
+    this.agent = agent;
     this.feishuService = new FeishuService(appConfig.feishu);
-    this.opencodeService = new OpenCodeService(appConfig.opencode.baseUrl);
 
-    // 设置飞书消息处理器，传入完整上下文
+    // 设置飞书消息处理器
     this.feishuService.setMessageHandler(this.handleFeishuMessage.bind(this));
+
+    // 回复后飞书创建 thread 时，迁移 session 映射
+    this.feishuService.setThreadCreatedHandler((messageId, threadId) => {
+      const msgKey = `msg:${messageId}`;
+      const session = this.threadSessions.get(msgKey);
+      if (session) {
+        this.threadSessions.set(threadId, session);
+        this.threadSessions.delete(msgKey);
+        this.logger.info(`迁移 thread 会话: ${msgKey} -> ${threadId} (session: ${session.sessionId})`);
+      }
+    });
   }
 
   // 处理飞书消息（主入口）
@@ -48,11 +58,11 @@ export class SageCore {
       // 获取或创建 Thread 对应的会话
       const sessionId = await this.getOrCreateThreadSession(ctx);
 
-      // 发送到 OpenCode 处理
-      const response = await this.opencodeService.sendMessage(sessionId, processedMessage);
+      // 发送到 Agent 处理
+      const response = await this.agent.sendMessage(sessionId, processedMessage);
 
       // 后处理回复
-      const processedResponse = this.postprocessResponse(response);
+      const processedResponse = this.postprocessResponse(response.text);
 
       // 更新最后活跃时间
       this.updateThreadActivity(ctx);
@@ -87,7 +97,11 @@ export class SageCore {
       return this.cmdHelp();
     }
 
-    return null; // 非命令，返回 null
+    if (text === '/status') {
+      return this.cmdStatus();
+    }
+
+    return null;
   }
 
   // /thread_id - 回复当前 THREAD ID
@@ -98,7 +112,8 @@ export class SageCore {
     if (ctx.threadId) {
       const info = [
         `Thread ID: ${ctx.threadId}`,
-        `OpenCode Session: ${session?.sessionId || '未创建'}`,
+        `Agent Provider: ${this.agent.name}`,
+        `Session: ${session?.sessionId || '未创建'}`,
         `创建者: ${session?.openId || 'N/A'}`,
         `创建时间: ${session ? new Date(session.createdAt).toLocaleString() : 'N/A'}`,
         `最后活跃: ${session ? new Date(session.lastActiveAt).toLocaleString() : 'N/A'}`,
@@ -115,11 +130,9 @@ export class SageCore {
     const session = this.threadSessions.get(threadKey);
 
     if (session) {
-      // 删除 OpenCode 会话
-      this.opencodeService.deleteSession(session.sessionId).catch(err => {
-        this.logger.error('删除 OpenCode 会话失败:', err);
+      this.agent.deleteSession(session.sessionId).catch(err => {
+        this.logger.error('删除 Agent 会话失败:', err);
       });
-      // 移除本地映射
       this.threadSessions.delete(threadKey);
       this.logger.info(`清除 thread 会话: ${threadKey}`);
       return '已清空当前话题的上下文。下一条消息将开启新的对话。';
@@ -131,29 +144,41 @@ export class SageCore {
   // /help - 帮助信息
   private cmdHelp(): string {
     return [
-      '📋 可用命令:',
+      '可用命令:',
       '',
       '/thread_id - 查看当前话题 ID 和会话信息',
       '/clear - 清空当前话题的上下文',
+      '/status - 查看服务状态',
       '/help - 显示此帮助信息',
       '',
-      '💡 使用说明:',
+      '使用说明:',
+      `• 当前 Agent: ${this.agent.name}`,
       '• 每条新消息会创建独立的话题上下文',
       '• 在话题中回复的消息共享同一上下文',
       '• 不同话题之间完全隔离',
     ].join('\n');
   }
 
-  // 解析 thread key：优先使用 thread_id，否则用 message_id
+  // /status - 服务状态
+  private cmdStatus(): string {
+    const status = this.getStatus();
+    return [
+      `Agent: ${this.agent.name}`,
+      `运行中: ${status.isRunning ? '是' : '否'}`,
+      `活跃话题: ${status.threadCount}`,
+      `活跃会话: ${status.sessionCount}`,
+    ].join('\n');
+  }
+
+  // 解析 thread key
   private resolveThreadKey(ctx: MessageContext): string {
     return ctx.threadId || `msg:${ctx.messageId}`;
   }
 
-  // 获取或创建 Thread 对应的 OpenCode 会话
+  // 获取或创建 Thread 对应的 Agent 会话
   private async getOrCreateThreadSession(ctx: MessageContext): Promise<string> {
     const threadKey = this.resolveThreadKey(ctx);
 
-    // 查找已有会话
     const existing = this.threadSessions.get(threadKey);
     if (existing) {
       this.logger.info(`复用 thread 会话: ${threadKey} -> ${existing.sessionId}`);
@@ -161,7 +186,7 @@ export class SageCore {
     }
 
     // 创建新会话
-    const session = await this.opencodeService.createSession();
+    const session = await this.agent.createSession();
     const now = Date.now();
 
     this.threadSessions.set(threadKey, {
@@ -171,7 +196,7 @@ export class SageCore {
       lastActiveAt: now,
     });
 
-    this.logger.info(`创建新 thread 会话: ${threadKey} -> ${session.id} (用户: ${ctx.openId})`);
+    this.logger.info(`创建新 thread 会话: ${threadKey} -> ${session.id} (provider: ${this.agent.name})`);
     return session.id;
   }
 
@@ -205,17 +230,16 @@ export class SageCore {
     }
 
     try {
-      this.logger.info('正在启动Sage核心服务...');
+      this.logger.info(`正在启动 Sage (agent: ${this.agent.name})...`);
 
+      // 初始化 Agent Provider
+      await this.agent.initialize();
+
+      // 启动飞书服务
       await this.feishuService.start();
 
-      const isHealthy = await this.opencodeService.healthCheck();
-      if (!isHealthy) {
-        throw new AppError('OpenCode服务健康检查失败', 'OPENCODE_UNHEALTHY');
-      }
-
       this.isRunning = true;
-      this.logger.info('Sage核心服务启动成功');
+      this.logger.info('Sage 核心服务启动成功');
 
       this.setupCleanupTask();
     } catch (error) {
@@ -232,10 +256,11 @@ export class SageCore {
     }
 
     try {
-      this.logger.info('正在停止Sage核心服务...');
+      this.logger.info('正在停止 Sage...');
       await this.feishuService.stop();
+      await this.agent.destroy();
       this.isRunning = false;
-      this.logger.info('Sage核心服务已停止');
+      this.logger.info('Sage 已停止');
     } catch (error) {
       this.logger.error('停止服务失败:', error);
       throw error;
@@ -244,12 +269,11 @@ export class SageCore {
 
   // 设置清理任务
   private setupCleanupTask(): void {
-    // 每6小时清理一次过期会话
-    const cleanupInterval = 6 * 60 * 60 * 1000;
+    const cleanupInterval = 6 * 60 * 60 * 1000; // 6小时
 
-    setInterval(() => {
+    setInterval(async () => {
       try {
-        const cleaned = this.cleanupExpiredThreadSessions();
+        const cleaned = await this.cleanupExpiredThreadSessions();
         if (cleaned > 0) {
           this.logger.info(`清理了 ${cleaned} 个过期 thread 会话`);
         }
@@ -261,18 +285,21 @@ export class SageCore {
     this.logger.info('已设置会话清理任务');
   }
 
-  // 清理过期的 Thread 会话（默认24小时过期）
-  private cleanupExpiredThreadSessions(maxAge: number = 24 * 60 * 60 * 1000): number {
+  // 清理过期的 Thread 会话
+  private async cleanupExpiredThreadSessions(maxAge: number = 24 * 60 * 60 * 1000): Promise<number> {
     const now = Date.now();
     let cleaned = 0;
 
     for (const [threadKey, session] of this.threadSessions.entries()) {
       if (now - session.lastActiveAt > maxAge) {
-        this.opencodeService.deleteSession(session.sessionId).catch(() => {});
+        this.agent.deleteSession(session.sessionId).catch(() => {});
         this.threadSessions.delete(threadKey);
         cleaned++;
       }
     }
+
+    // 同时让 provider 清理自己的过期会话
+    await this.agent.cleanupSessions(maxAge);
 
     return cleaned;
   }
@@ -280,13 +307,15 @@ export class SageCore {
   // 获取服务状态
   getStatus(): {
     isRunning: boolean;
+    agentProvider: string;
     threadCount: number;
     sessionCount: number;
   } {
     return {
       isRunning: this.isRunning,
+      agentProvider: this.agent.name,
       threadCount: this.threadSessions.size,
-      sessionCount: this.opencodeService.getAllSessions().length,
+      sessionCount: this.agent.getActiveSessions().length,
     };
   }
 

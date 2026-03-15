@@ -18,6 +18,7 @@
     "typescript": "^5.0.0"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.76",
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "@opencode-ai/sdk": "^1.2.20",
     "dotenv": "^17.3.1",
