@@ -36,3 +36,7 @@ nohup.out
 .DS_Store
 
 data
+
+# agent memory (separate repo)
+agent_home/memory
+agent_home/wikis
