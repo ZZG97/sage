@@ -84,6 +84,11 @@ export class FeishuService {
 
       this.logger.info(`用户消息: text="${messageText}", openId=${openId}, threadId=${threadId || '无'}, messageId=${message.message_id}`);
 
+      // 立即回复一个表情，表示已收到消息
+      this.addReaction(message.message_id, 'THUMBSUP').catch(err => {
+        this.logger.warn('添加表情回复失败:', err);
+      });
+
       // 构建消息上下文
       const ctx: MessageContext = {
         text: messageText,
@@ -159,6 +164,19 @@ export class FeishuService {
       this.logger.info(`回复发送成功 (chat_type: ${message.chat_type})`);
     } catch (error) {
       throw new AppError('发送回复消息失败', 'SEND_REPLY_FAILED');
+    }
+  }
+
+  // 给消息添加表情回复
+  async addReaction(messageId: string, emojiType: string): Promise<void> {
+    try {
+      await this.client.im.v1.messageReaction.create({
+        path: { message_id: messageId },
+        data: { reaction_type: { emoji_type: emojiType } },
+      });
+      this.logger.info(`表情回复已添加: ${emojiType} -> ${messageId}`);
+    } catch (error) {
+      this.logger.error('添加表情回复失败:', error);
     }
   }
 

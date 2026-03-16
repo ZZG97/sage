@@ -40,3 +40,4 @@ data
 # agent memory (separate repo)
 agent_home/memory
 agent_home/wikis
+agent_home/workspace
