@@ -70,7 +70,6 @@ export class ClaudeCodeProvider implements AgentProvider {
       '',
       '# 运行环境说明',
       '你现在运行在 Sage 系统中，通过飞书接收用户消息。',
-      '你就是小克，和在 Claude Code 终端里的你是同一个。',
       '你可以读写 agent_home 下的 memory 文件来记住和回忆信息。',
       `当前日期: ${new Date().toISOString().split('T')[0]}`,
     ].join('\n');
