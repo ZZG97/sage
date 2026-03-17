@@ -11,7 +11,15 @@
     "build": "bun build src/index.ts --outdir=dist",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
-    "lint": "echo 'Linting...' && exit 0"
+    "lint": "echo 'Linting...' && exit 0",
+    "dev:start": "pm2 start ecosystem.config.cjs --only sage-dev",
+    "dev:stop": "pm2 stop sage-dev",
+    "dev:restart": "pm2 restart sage-dev",
+    "dev:logs": "pm2 logs sage-dev --lines 50",
+    "dev:status": "pm2 show sage-dev",
+    "prod:restart": "pm2 restart sage",
+    "prod:logs": "pm2 logs sage --lines 50",
+    "prod:status": "pm2 show sage"
   },
   "devDependencies": {
     "@types/bun": "latest",

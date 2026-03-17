@@ -1,9 +1,5 @@
-import { config } from 'dotenv';
 import { AppConfig } from '../types';
 import { AgentProviderConfig } from '../agent';
-
-// 加载环境变量
-config();
 
 export const appConfig: AppConfig = {
   feishu: {
