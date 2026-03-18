@@ -37,16 +37,25 @@ If not running:
 
 Wait 2s, verify port 9222 is listening.
 
-### 2. Start Sage Service
+### 2. Start Sage Dev Service
 
-**Always redirect logs to file** — background processes lose stdout otherwise.
+**Always use pm2 to manage the `sage-dev` instance. NEVER start a raw `bun` process or kill processes by port/pid — that risks killing the prod `sage` instance.**
 
 ```bash
-cd /Users/zhangzhiguo/workspace/sage
-bun run src/index.ts > /tmp/sage.log 2>&1 &
+cd /Users/zhangzhiguo/workspace/sage && pm2 restart sage-dev
 ```
 
-Wait 3s, verify process is running and log shows "启动成功".
+Wait 3s, then verify startup:
+
+```bash
+tail -20 /Users/zhangzhiguo/workspace/sage/logs/sage-dev.log
+```
+
+Look for "启动成功". If `sage-dev` is not in pm2 list yet, start it first:
+
+```bash
+cd /Users/zhangzhiguo/workspace/sage && pm2 start ecosystem.config.cjs --only sage-dev
+```
 
 ### 3. Open Feishu & Navigate to OWL
 
@@ -74,7 +83,7 @@ async (page) => {
 Wait 5-10s for processing, then check logs:
 
 ```bash
-grep -i "keyword" /tmp/sage.log
+grep -i "keyword" /Users/zhangzhiguo/workspace/sage/logs/sage-dev.log
 ```
 
 Look for:
@@ -96,9 +105,13 @@ Or use `mcp__playwright__browser_take_screenshot` with absolute path in filename
 
 ### 7. Cleanup
 
+Leave `sage-dev` running via pm2 — do NOT kill it manually. If you need to stop it:
+
 ```bash
-kill $(ps aux | grep "bun.*src/index.ts" | grep -v grep | awk '{print $2}')
+pm2 stop sage-dev
 ```
+
+**NEVER use `kill` with grep patterns like `bun.*src/index.ts` — this will also kill the prod `sage` instance.**
 
 ## Lessons Learned
 
@@ -118,9 +131,16 @@ These are hard-won insights — do NOT skip them.
   - `im:message` — send/receive messages
   - `im:message.reactions:write_only` — add emoji reactions
 
+### Dev vs Prod Separation
+- **sage** (prod): port 3000, `.env`, managed by pm2, logs at `logs/sage.log`
+- **sage-dev** (dev): port 3001, `.env.dev`, managed by pm2, logs at `logs/sage-dev.log`
+- **ALWAYS** use `pm2 restart sage-dev` for testing — never start a raw bun process
+- **NEVER** kill processes by grep pattern (`bun.*src/index.ts`) or by port (`lsof -i :3000 | kill`) — this will take down prod
+- If port 3001 is already in use, that IS sage-dev — just `pm2 restart sage-dev`
+
 ### Debugging
-- Always redirect service logs: `> /tmp/sage.log 2>&1`
-- Use `grep -i "keyword" /tmp/sage.log` to check specific behaviors
+- Check dev logs: `tail -f /Users/zhangzhiguo/workspace/sage/logs/sage-dev.log`
+- Use `grep -i "keyword" /Users/zhangzhiguo/workspace/sage/logs/sage-dev.log` to check specific behaviors
 - Feishu page title shows unread count: "飞书 (N)" means N new messages arrived
 
 ### Screenshots & Temp Files

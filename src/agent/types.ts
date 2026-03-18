@@ -54,7 +54,7 @@ export interface OpenCodeProviderConfig {
 
 export interface ClaudeCodeProviderConfig {
   type: 'claude-code';
-  workDir: string; // Claude Code 工作目录
+  workDir?: string; // Claude Code 工作目录
   maxTurns?: number; // 最大交互轮数，默认 25
   allowedTools?: string[]; // 允许的工具列表
   model?: string; // 模型，如 'sonnet', 'opus'

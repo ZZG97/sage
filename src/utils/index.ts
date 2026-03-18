@@ -19,7 +19,7 @@ export class Logger {
   }
 
   debug(message: string, ...args: any[]) {
-    if (process.env.NODE_ENV === 'development') {
+    if (process.env.NODE_ENV === 'development' || process.env.LOG_LEVEL === 'debug') {
       console.debug(`[${new Date().toISOString()}] [DEBUG] [${this.context}] ${message}`, ...args);
     }
   }

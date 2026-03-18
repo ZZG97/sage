@@ -2,9 +2,11 @@ module.exports = {
   apps: [
     {
       name: 'sage',
-      script: 'bun',
-      args: '--env-file .env src/index.ts',
+      // 防休眠命令
+      script: 'caffeinate',
+      args: '-i bun --env-file .env src/index.ts',
       cwd: __dirname,
+      env: { CLAUDE_CODE_WORK_DIR: __dirname + '/agent_home' },
       restart_delay: 3000,
       max_restarts: 10,
       out_file: 'logs/sage.log',
@@ -16,6 +18,7 @@ module.exports = {
       script: 'bun',
       args: '--env-file .env.dev src/index.ts',
       cwd: __dirname,
+      env: { CLAUDE_CODE_WORK_DIR: __dirname + '/agent_home' },
       restart_delay: 3000,
       max_restarts: 10,
       out_file: 'logs/sage-dev.log',

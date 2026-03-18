@@ -25,9 +25,9 @@ export class ClaudeCodeProvider implements AgentProvider {
   constructor(config: ClaudeCodeProviderConfig) {
     this.logger = new Logger('ClaudeCodeProvider');
     // 展开 ~ 为 HOME 路径
-    this.workDir = config.workDir.startsWith('~')
+    this.workDir = config.workDir?.startsWith('~')
       ? config.workDir.replace('~', process.env.HOME || '')
-      : config.workDir;
+      : (config.workDir ?? '');
     this.maxTurns = config.maxTurns ?? 30;
     this.allowedTools = config.allowedTools ?? [];
     this.model = config.model ?? 'claude-sonnet-4-6';
@@ -157,7 +157,28 @@ export class ClaudeCodeProvider implements AgentProvider {
           newSdkSessionId = msg.session_id;
         }
 
-        if (msg.type === 'result') {
+        // 打印中间过程，方便观测卡住时的状态
+        if (msg.type === 'assistant') {
+          const content = (msg as any).message?.content ?? [];
+          for (const block of content) {
+            if (block.type === 'text' && block.text?.trim()) {
+              this.logger.debug(`[assistant] ${block.text.slice(0, 200)}`);
+            } else if (block.type === 'tool_use') {
+              const input = JSON.stringify(block.input ?? {}).slice(0, 150);
+              this.logger.info(`[tool_use] ${block.name}  input: ${input}`);
+            }
+          }
+        } else if (msg.type === 'user') {
+          const content = (msg as any).message?.content ?? [];
+          for (const block of content) {
+            if (block.type === 'tool_result') {
+              const output = JSON.stringify(block.content ?? '').slice(0, 150);
+              this.logger.debug(`[tool_result] tool_use_id=${block.tool_use_id}  output: ${output}`);
+            }
+          }
+        } else if (msg.type === 'system') {
+          this.logger.debug(`[system] subtype=${(msg as any).subtype}`);
+        } else if (msg.type === 'result') {
           const resultMsg = msg as SDKResultMessage;
           if (resultMsg.subtype === 'success' && 'result' in resultMsg) {
             resultText = resultMsg.result;

@@ -137,6 +137,28 @@ export class FeishuService {
     }
   }
 
+  // 构建 Markdown 卡片内容（JSON 2.0，支持完整 Markdown 语法）
+  private buildMarkdownCard(text: string): string {
+    // 飞书卡片图片需要先上传获取 image_key，直接用 URL/文件名会报错
+    // 将 ![alt](src) 降级为纯链接 [alt](src)，无 alt 时用 "图片"
+    const sanitized = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, src) => {
+      const label = alt || '图片';
+      return `[${label}](${src})`;
+    });
+    return JSON.stringify({
+      schema: '2.0',
+      config: { wide_screen_mode: true },
+      body: {
+        elements: [
+          {
+            tag: 'markdown',
+            content: sanitized,
+          },
+        ],
+      },
+    });
+  }
+
   // 发送回复消息
   private async sendReply(message: FeishuMessage['message'], responseText: string): Promise<void> {
     try {
@@ -146,8 +168,8 @@ export class FeishuService {
           message_id: message.message_id,
         },
         data: {
-          content: JSON.stringify({ text: responseText }),
-          msg_type: 'text',
+          content: this.buildMarkdownCard(responseText),
+          msg_type: 'interactive',
           reply_in_thread: true,
         },
       });

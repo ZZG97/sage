@@ -27,8 +27,7 @@ export function getAgentConfig(): AgentProviderConfig {
     case 'claude-code':
       return {
         type: 'claude-code',
-        // 默认指向 agent_home，让小克共享身份和记忆
-        workDir: process.env.CLAUDE_CODE_WORK_DIR || `${process.env.HOME}/workspace/agent_home`,
+        workDir: process.env.CLAUDE_CODE_WORK_DIR,
         maxTurns: parseInt(process.env.CLAUDE_CODE_MAX_TURNS || '30', 10),
         allowedTools: process.env.CLAUDE_CODE_ALLOWED_TOOLS?.split(',').filter(Boolean),
         model: process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-4-6',
