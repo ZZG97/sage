@@ -1,5 +1,8 @@
 import { SageCore } from './services/core';
 import { WebServer } from './services/web';
+import { HistoryStore } from './services/history-store';
+import { Scheduler } from './services/scheduler';
+import { registerTasks } from './services/tasks';
 import { validateConfig, getAgentConfig } from './config';
 import { createAgentProvider } from './agent';
 import { Logger } from './utils';
@@ -9,6 +12,8 @@ const logger = new Logger('Main');
 class Application {
   private sageCore!: SageCore;
   private webServer!: WebServer;
+  private historyStore!: HistoryStore;
+  private scheduler!: Scheduler;
   private isShuttingDown: boolean = false;
 
   async start(): Promise<void> {
@@ -26,13 +31,25 @@ class Application {
       const agent = createAgentProvider(agentConfig);
       logger.info(`使用 Agent Provider: ${agent.name}`);
 
+      // 创建 HistoryStore（默认路径 data/history.db）
+      const env = process.env.NODE_ENV === 'development' ? 'dev' : 'production';
+      this.historyStore = new HistoryStore(undefined, env);
+
       // 创建核心服务
-      this.sageCore = new SageCore(agent);
+      this.sageCore = new SageCore(agent, this.historyStore);
       this.webServer = new WebServer(this.sageCore);
+
+      // 创建调度器
+      this.scheduler = new Scheduler({
+        agent,
+        logger: new Logger('Task'),
+      });
+      registerTasks(this.scheduler);
 
       // 启动
       await this.sageCore.start();
       await this.webServer.start();
+      this.scheduler.start();
 
       logger.info('Sage AI 助手启动成功！');
       logger.info('服务正在运行，按 Ctrl+C 停止服务');
@@ -56,7 +73,9 @@ class Application {
       logger.info(`收到 ${signal} 信号，正在优雅关闭服务...`);
 
       try {
+        this.scheduler.stop();
         await this.sageCore.stop();
+        this.historyStore.destroy();
         logger.info('服务已完全停止');
         process.exit(0);
       } catch (error) {

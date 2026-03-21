@@ -2,20 +2,58 @@
 import { Database } from 'bun:sqlite';
 import { Logger } from '../utils';
 import type { AgentEvent } from '../agent/types';
-import { join } from 'path';
+import { join, resolve } from 'path';
+
+// 默认 db 路径: {项目根}/data/history.db
+const DEFAULT_DB_PATH = resolve(import.meta.dir, '../../data/history.db');
+
+export interface SessionWithEvents {
+  id: string;
+  provider: string;
+  open_id: string | null;
+  chat_id: string | null;
+  chat_type: string | null;
+  started_at: string;
+  last_active_at: string;
+  summary: string | null;
+  events: Array<{
+    role: string;
+    type: string;
+    position: number;
+    content: string | null;
+    tool_name: string | null;
+    ts: string;
+  }>;
+}
+
+/** 从 IANA 时区名计算 SQLite 用的 UTC 偏移修饰符，如 '${this.tzModifier}'、'-5 hours' */
+function sqliteTimezoneModifier(tz?: string): string {
+  const timeZone = tz || process.env.TZ || 'Asia/Shanghai';
+  // 用 Intl 取当前 UTC 偏移（分钟）
+  const now = new Date();
+  const utcStr = now.toLocaleString('en-US', { timeZone: 'UTC' });
+  const localStr = now.toLocaleString('en-US', { timeZone });
+  const diffMs = new Date(localStr).getTime() - new Date(utcStr).getTime();
+  const diffHours = Math.round(diffMs / 3600000);
+  const sign = diffHours >= 0 ? '+' : '';
+  return `${sign}${diffHours} hours`;
+}
 
 export class HistoryStore {
   private db: Database;
   private logger: Logger;
   private env: string;
+  private tzModifier: string;
 
-  constructor(dbPath: string, env: string = 'production') {
+  constructor(dbPath?: string, env: string = 'production', timezone?: string) {
     this.logger = new Logger('HistoryStore');
     this.env = env;
-    this.db = new Database(dbPath, { create: true });
+    this.tzModifier = sqliteTimezoneModifier(timezone);
+    const resolvedPath = dbPath ?? DEFAULT_DB_PATH;
+    this.db = new Database(resolvedPath, { create: true });
     this.db.exec('PRAGMA journal_mode = WAL');
     this.initSchema();
-    this.logger.info(`对话历史数据库已打开: ${dbPath}`);
+    this.logger.info(`对话历史数据库已打开: ${resolvedPath}`);
   }
 
   private initSchema(): void {
@@ -49,6 +87,7 @@ export class HistoryStore {
 
       CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
       CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
+      CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
     `);
   }
 
@@ -122,6 +161,45 @@ export class HistoryStore {
     return this.db.query(
       `SELECT * FROM events WHERE session_id = ? ORDER BY position`
     ).all(sessionId);
+  }
+
+  /** 按日期查询 sessions + events */
+  getSessionsForDate(date: string): SessionWithEvents[] {
+    const sessions = this.db.query(
+      `SELECT * FROM sessions WHERE env = ? AND date(started_at, '${this.tzModifier}') = ? ORDER BY started_at ASC`
+    ).all(this.env, date) as any[];
+
+    return this.attachEvents(sessions);
+  }
+
+  /** 按日期范围查询 sessions + events */
+  getSessionsByDateRange(startDate: string, endDate: string): SessionWithEvents[] {
+    const sessions = this.db.query(
+      `SELECT * FROM sessions WHERE env = ? AND date(started_at, '${this.tzModifier}') >= ? AND date(started_at, '${this.tzModifier}') <= ? ORDER BY started_at ASC`
+    ).all(this.env, startDate, endDate) as any[];
+
+    return this.attachEvents(sessions);
+  }
+
+  /** 为 sessions 填充 events */
+  private attachEvents(sessions: any[]): SessionWithEvents[] {
+    if (sessions.length === 0) return [];
+
+    const eventStmt = this.db.prepare(
+      `SELECT role, type, position, content, tool_name, ts FROM events WHERE session_id = ? ORDER BY position`
+    );
+
+    return sessions.map(s => ({
+      id: s.id,
+      provider: s.provider,
+      open_id: s.open_id,
+      chat_id: s.chat_id,
+      chat_type: s.chat_type,
+      started_at: s.started_at,
+      last_active_at: s.last_active_at,
+      summary: s.summary,
+      events: eventStmt.all(s.id) as SessionWithEvents['events'],
+    }));
   }
 
   /** 搜索历史（全文搜 content） */

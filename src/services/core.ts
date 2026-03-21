@@ -1,10 +1,9 @@
 import { FeishuService } from './feishu';
 import { AgentProvider } from '../agent';
-import { HistoryStore } from './history-store';
+import type { HistoryStore } from './history-store';
 import { Logger, AppError } from '../utils';
 import { appConfig } from '../config';
 import { MessageContext } from '../types';
-import { join } from 'path';
 
 // Thread 会话信息
 interface ThreadSession {
@@ -24,15 +23,11 @@ export class SageCore {
   // Thread 隔离的会话管理
   private threadSessions: Map<string, ThreadSession> = new Map();
 
-  constructor(agent: AgentProvider) {
+  constructor(agent: AgentProvider, historyStore: HistoryStore) {
     this.logger = new Logger('SageCore');
     this.agent = agent;
+    this.historyStore = historyStore;
     this.feishuService = new FeishuService(appConfig.feishu);
-
-    // 初始化对话历史存储
-    const dbPath = join(process.cwd(), 'agent_home', 'workspace', 'history.db');
-    const env = process.env.NODE_ENV === 'development' ? 'dev' : 'production';
-    this.historyStore = new HistoryStore(dbPath, env);
 
     // 设置飞书消息处理器
     this.feishuService.setMessageHandler(this.handleFeishuMessage.bind(this));
@@ -281,7 +276,6 @@ export class SageCore {
       this.logger.info('正在停止 Sage...');
       await this.feishuService.stop();
       await this.agent.destroy();
-      this.historyStore.destroy();
       this.isRunning = false;
       this.logger.info('Sage 已停止');
     } catch (error) {

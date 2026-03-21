@@ -12,8 +12,12 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "types": ["bun-types"]
+    "types": ["bun-types"],
+    "baseUrl": ".",
+    "paths": {
+      "@sage/*": ["./src/*"]
+    }
   },
-  "include": ["src/**/*", "*.ts"],
+  "include": ["src/**/*", "agent_home/.claude/skills/**/*", "*.ts"],
   "exclude": ["node_modules", "dist"]
 }
