@@ -5,8 +5,6 @@ import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import { AgentProvider, AgentSession, AgentResponse, AgentEvent, ClaudeCodeProviderConfig } from './types';
 import { Logger } from '../utils';
-import { readFileSync } from 'fs';
-import { join } from 'path';
 
 export class ClaudeCodeProvider implements AgentProvider {
   readonly name = 'claude-code';
@@ -37,40 +35,14 @@ export class ClaudeCodeProvider implements AgentProvider {
   }
 
   /**
-   * 读取 agent_home 下的身份文件，构建 system prompt 追加内容
+   * 构建 system prompt 追加内容（仅运行环境说明）
+   * 身份(SOUL.md)、用户(USER.md)、记忆(MEMORY.md) 已通过 CLAUDE.md 的 @ 引用自动加载，无需重复注入
    */
   private buildSystemPromptAppend(): string {
-    const parts: string[] = [];
-
-    // 读取 SOUL.md
-    try {
-      const soulPath = join(this.workDir, 'memory', 'SOUL.md');
-      const soul = readFileSync(soulPath, 'utf-8');
-      parts.push(soul);
-    } catch (e) {
-      this.logger.warn('无法读取 SOUL.md，将不注入身份信息');
-    }
-
-    // 读取 USER.md
-    try {
-      const userPath = join(this.workDir, 'memory', 'USER.md');
-      const user = readFileSync(userPath, 'utf-8');
-      parts.push(user);
-    } catch (e) {
-      this.logger.warn('无法读取 USER.md，将不注入用户信息');
-    }
-
-    if (parts.length === 0) return '';
-
     return [
-      '',
-      '# 身份与用户上下文（来自 agent_home）',
-      '',
-      ...parts,
       '',
       '# 运行环境说明',
       '你现在运行在 Sage 系统中，通过飞书接收用户消息。',
-      '你可以读写 agent_home 下的 memory 文件来记住和回忆信息。',
       `当前日期: ${new Date().toISOString().split('T')[0]}`,
     ].join('\n');
   }

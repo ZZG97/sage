@@ -70,4 +70,11 @@ export interface ClaudeCodeProviderConfig {
   model?: string; // 模型，如 'sonnet', 'opus'
 }
 
-export type AgentProviderConfig = OpenCodeProviderConfig | ClaudeCodeProviderConfig;
+export interface CodexProviderConfig {
+  type: 'codex';
+  workDir?: string;       // Codex 工作目录
+  model?: string;         // 模型，如 'o4-mini', 'o3'
+  sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
+}
+
+export type AgentProviderConfig = OpenCodeProviderConfig | ClaudeCodeProviderConfig | CodexProviderConfig;

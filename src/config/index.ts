@@ -18,7 +18,7 @@ export const appConfig: AppConfig = {
 
 /**
  * 根据环境变量构建 AgentProvider 配置
- * AGENT_PROVIDER: 'opencode' | 'claude-code'，默认 'opencode'
+ * AGENT_PROVIDER: 'opencode' | 'claude-code' | 'codex'，默认 'opencode'
  */
 export function getAgentConfig(): AgentProviderConfig {
   const provider = process.env.AGENT_PROVIDER || 'opencode';
@@ -31,6 +31,14 @@ export function getAgentConfig(): AgentProviderConfig {
         maxTurns: parseInt(process.env.CLAUDE_CODE_MAX_TURNS || '30', 10),
         allowedTools: process.env.CLAUDE_CODE_ALLOWED_TOOLS?.split(',').filter(Boolean),
         model: process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-4-6',
+      };
+
+    case 'codex':
+      return {
+        type: 'codex',
+        workDir: process.env.CODEX_WORK_DIR,
+        model: process.env.CODEX_MODEL || 'gpt-5.3-codex',
+        sandboxMode: (process.env.CODEX_SANDBOX_MODE as any) || 'danger-full-access',
       };
 
     case 'opencode':

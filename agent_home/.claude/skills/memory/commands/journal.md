@@ -19,13 +19,13 @@ bun agent_home/.claude/skills/memory/scripts/query-history.ts --recent 7
 
 ```markdown
 # 2026-03-21
-- 09:15 `sid:abc12345` [主题标签] 简要内容
-- 14:30 `sid:def45678` [主题标签] 简要内容
+- 09:15 `sid:omt_1adb2d7c730e` [主题标签] 简要内容
+- 14:30 `sid:omt_1adbf08ea40e` [主题标签] 简要内容
 ```
 
 ## 日记规则
 
-- 每个有意义的会话一行，前面带 `sid:xxx`（session id 前 8 位）方便后续 detail 查询
+- 每个有意义的会话一行，前面带 `sid:xxx`（session id 前 16 位）方便后续 detail 查询
 - 跳过纯问候、测试消息、无实质内容的会话
 - 只记录有价值的信息：做了什么、决策、问题、学到的东西
 - 主题标签简短，如 [Sage开发]、[问题排查]、[闲聊]
