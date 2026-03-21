@@ -3,6 +3,8 @@ First read `SOUL.md` to recall who you are, your identity, principles, and capab
 @memory/SOUL.md
 Then read `USER.md` to recall who the user is, his preferences, ongoing context, and important history.
 @memory/USER.md
+Then read `MEMORY.md` to see available memories and decide what to load based on the current topic.
+@memory/MEMORY.md
 # CLAUDE.md
 ## Capabilities
 - As Claude Code, you are the smartest coding agent in the world. You can code in any language, and you can use any library or framework. Use context7 to get the latest information.
@@ -14,9 +16,11 @@ Then read `USER.md` to recall who the user is, his preferences, ongoing context,
 ├── CLAUDE.md              # This file; workspace rules and conventions
 ├── .claude/               # Claude/Cursor configuration
 │   └── skills/            # Your skills (one folder per skill); Newly added skills should be placed here.
-├── memory/                # Session-loaded context (keep SOUL.md, USER.md under 1000 tokens each)
-│   ├── SOUL.md            # Your identity, principles, capabilities
-│   └── USER.md            # User preferences, context, history
+├── memory/                # Session-loaded context
+│   ├── SOUL.md            # Your identity, principles, capabilities (always loaded)
+│   ├── USER.md            # User preferences, context, history (always loaded)
+│   ├── MEMORY.md          # Memory index — on-demand file references (always loaded)
+│   └── journals/          # Daily/weekly journals, archive/ for old dailies
 ├── wikis/                 # Knowledge base (Obsidian-style; see wiki skill)
 └── workspace/             # Workspace root. All your work and outputs should be stored here.
     ├── projects/          # Git repos and code projects
@@ -39,4 +43,4 @@ All memory reads/writes go to `./memory/` (relative to this CLAUDE.md). Do NOT u
 
 ## Notes
 - All UPPERCASE `.md` files under `memory/` (e.g., `SOUL.md`, `USER.md`) **must be written in English**, except for user-language-specific proper nouns, names, or terms that lose meaning in translation.
-- `SOUL.md` and `USER.md` are loaded into context every session. **Keep each file under 1000 tokens.** Be ruthless about deduplication and conciseness. Move detailed or archival information to separate files under `memory/` if needed.
+- `SOUL.md`, `USER.md`, `MEMORY.md` are loaded into context every session. **Keep each file under 1000 tokens.** Be ruthless about deduplication and conciseness.

@@ -1,4 +1,4 @@
-// 定时任务：周记整合（触发器，逻辑由 summarize-journal skill 执行）
+// 定时任务：周记整合 + 记忆整理（触发器，逻辑由 memory skill 执行）
 import type { TaskContext } from '../scheduler';
 
 export async function weeklyConsolidation(ctx: TaskContext): Promise<void> {
@@ -7,7 +7,7 @@ export async function weeklyConsolidation(ctx: TaskContext): Promise<void> {
 
   const session = await ctx.agent.createSession();
   try {
-    await ctx.agent.sendMessage(session.id, '请整合本周日记为周记');
+    await ctx.agent.sendMessage(session.id, '请整合本周日记为周记，然后整理记忆');
   } finally {
     await ctx.agent.deleteSession(session.id);
   }

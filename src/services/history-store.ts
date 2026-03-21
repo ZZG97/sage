@@ -212,6 +212,13 @@ export class HistoryStore {
     ).all(`%${keyword}%`, limit);
   }
 
+  /** 按 session_id 前缀模糊匹配 */
+  findSessionsByPrefix(prefix: string): any[] {
+    return this.db.query(
+      `SELECT * FROM sessions WHERE id LIKE ? ORDER BY last_active_at DESC LIMIT 10`
+    ).all(`${prefix}%`);
+  }
+
   /** 获取最近的 sessions */
   getRecentSessions(limit: number = 20): any[] {
     return this.db.query(
