@@ -1,8 +1,10 @@
 import { FeishuService } from './feishu';
 import { AgentProvider } from '../agent';
+import { HistoryStore } from './history-store';
 import { Logger, AppError } from '../utils';
 import { appConfig } from '../config';
 import { MessageContext } from '../types';
+import { join } from 'path';
 
 // Thread 会话信息
 interface ThreadSession {
@@ -15,6 +17,7 @@ interface ThreadSession {
 export class SageCore {
   private feishuService: FeishuService;
   private agent: AgentProvider;
+  private historyStore: HistoryStore;
   private logger: Logger;
   private isRunning: boolean = false;
 
@@ -25,6 +28,11 @@ export class SageCore {
     this.logger = new Logger('SageCore');
     this.agent = agent;
     this.feishuService = new FeishuService(appConfig.feishu);
+
+    // 初始化对话历史存储
+    const dbPath = join(process.cwd(), 'agent_home', 'workspace', 'history.db');
+    const env = process.env.NODE_ENV === 'development' ? 'dev' : 'production';
+    this.historyStore = new HistoryStore(dbPath, env);
 
     // 设置飞书消息处理器
     this.feishuService.setMessageHandler(this.handleFeishuMessage.bind(this));
@@ -37,6 +45,9 @@ export class SageCore {
         this.threadSessions.set(threadId, session);
         this.threadSessions.delete(msgKey);
         this.logger.info(`迁移 thread 会话: ${msgKey} -> ${threadId} (session: ${session.sessionId})`);
+
+        // 同步迁移历史记录的 session_id
+        this.historyStore.migrateSessionId(msgKey, threadId);
       }
     });
   }
@@ -58,8 +69,19 @@ export class SageCore {
       // 获取或创建 Thread 对应的会话
       const sessionId = await this.getOrCreateThreadSession(ctx);
 
+      // 记录用户消息
+      const threadKey = this.resolveThreadKey(ctx);
+      this.historyStore.saveUserMessage(threadKey, this.agent.name, processedMessage, {
+        openId: ctx.openId,
+        chatId: ctx.chatId,
+        chatType: ctx.chatType,
+      });
+
       // 发送到 Agent 处理
       const response = await this.agent.sendMessage(sessionId, processedMessage);
+
+      // 记录 agent 事件
+      this.historyStore.saveAgentEvents(threadKey, this.agent.name, response.events);
 
       // 后处理回复
       const processedResponse = this.postprocessResponse(response.text);
@@ -259,6 +281,7 @@ export class SageCore {
       this.logger.info('正在停止 Sage...');
       await this.feishuService.stop();
       await this.agent.destroy();
+      this.historyStore.destroy();
       this.isRunning = false;
       this.logger.info('Sage 已停止');
     } catch (error) {

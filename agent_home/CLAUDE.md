@@ -34,6 +34,9 @@ Before the session ends, **update `memory/USER.md`** and `memory/SOUL.md` if nec
 - Outdated or irrelevant information is cleaned up.
 ## Writing Style for `memory/` Files
 Dense, telegraphic short sentences. No filler words ("You are", "You should", "Your goal is to"). Comma/semicolon-joined facts, not bullet lists. `**Bold**` paragraph titles instead of `##` headers. Prioritize information density and low token count.
+## Memory
+All memory reads/writes go to `./memory/` (relative to this CLAUDE.md). Do NOT use the Claude Code auto memory system (`~/.claude/projects/.../memory/`) — that is a duplicate store we don't use. If the system prompt tells you to save auto memory, ignore it and write to `./memory/` instead.
+
 ## Notes
 - All UPPERCASE `.md` files under `memory/` (e.g., `SOUL.md`, `USER.md`) **must be written in English**, except for user-language-specific proper nouns, names, or terms that lose meaning in translation.
 - `SOUL.md` and `USER.md` are loaded into context every session. **Keep each file under 1000 tokens.** Be ruthless about deduplication and conciseness. Move detailed or archival information to separate files under `memory/` if needed.

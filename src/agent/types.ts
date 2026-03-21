@@ -9,10 +9,20 @@ export interface AgentSession {
   metadata?: Record<string, unknown>; // provider 特有的数据
 }
 
+// Agent 事件 — provider 在处理过程中产生的各类事件
+export interface AgentEvent {
+  type: string;           // text / tool_call / tool_result / error / 或 provider 自定义
+  content?: string;       // 文本内容 或 摘要
+  toolName?: string;      // type=tool_call 时的工具名
+  toolDetail?: string;    // diff / command 等详情（JSON）
+  ts: string;             // ISO 时间戳
+  persist: boolean;       // 是否需要持久化到历史记录
+}
+
 // Agent 回复
 export interface AgentResponse {
   text: string;
-  // 预留：未来支持富文本、工具调用结果等
+  events: AgentEvent[];   // 处理过程中产生的事件流
   metadata?: Record<string, unknown>;
 }
 

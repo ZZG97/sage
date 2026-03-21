@@ -69,7 +69,15 @@ export class OpenCodeProvider implements AgentProvider {
     const session = this.sessions.get(sessionId);
     if (session) session.updatedAt = Date.now();
 
-    return { text };
+    return {
+      text,
+      events: [{
+        type: 'text',
+        content: text,
+        ts: new Date().toISOString(),
+        persist: true,
+      }],
+    };
   }
 
   async deleteSession(sessionId: string): Promise<void> {

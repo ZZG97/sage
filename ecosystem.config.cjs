@@ -15,8 +15,8 @@ module.exports = {
     },
     {
       name: 'sage-dev',
-      script: 'bun',
-      args: '--env-file .env.dev src/index.ts',
+      script: 'caffeinate',
+      args: '-i bun --env-file .env.dev src/index.ts',
       cwd: __dirname,
       env: { CLAUDE_CODE_WORK_DIR: __dirname + '/agent_home' },
       restart_delay: 3000,

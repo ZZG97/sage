@@ -3,7 +3,7 @@
 
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
-import { AgentProvider, AgentSession, AgentResponse, ClaudeCodeProviderConfig } from './types';
+import { AgentProvider, AgentSession, AgentResponse, AgentEvent, ClaudeCodeProviderConfig } from './types';
 import { Logger } from '../utils';
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -149,8 +149,9 @@ export class ClaudeCodeProvider implements AgentProvider {
 
       let resultText = '';
       let newSdkSessionId = '';
+      const events: AgentEvent[] = [];
 
-      // 消费 stream，收集结果
+      // 消费 stream，收集结果和事件
       for await (const msg of q) {
         // 记录 session_id 用于后续 resume
         if ('session_id' in msg && msg.session_id) {
@@ -163,9 +164,30 @@ export class ClaudeCodeProvider implements AgentProvider {
           for (const block of content) {
             if (block.type === 'text' && block.text?.trim()) {
               this.logger.debug(`[assistant] ${block.text.slice(0, 200)}`);
+              events.push({
+                type: 'text',
+                content: block.text,
+                ts: new Date().toISOString(),
+                persist: true,
+              });
             } else if (block.type === 'tool_use') {
               const input = JSON.stringify(block.input ?? {}).slice(0, 150);
               this.logger.info(`[tool_use] ${block.name}  input: ${input}`);
+              events.push({
+                type: 'tool_call',
+                toolName: block.name,
+                content: this.summarizeToolCall(block.name, block.input),
+                toolDetail: this.extractToolDetail(block.name, block.input),
+                ts: new Date().toISOString(),
+                persist: true,
+              });
+            } else if (block.type === 'thinking') {
+              // thinking 不存
+              events.push({
+                type: 'thinking',
+                ts: new Date().toISOString(),
+                persist: false,
+              });
             }
           }
         } else if (msg.type === 'user') {
@@ -174,6 +196,12 @@ export class ClaudeCodeProvider implements AgentProvider {
             if (block.type === 'tool_result') {
               const output = JSON.stringify(block.content ?? '').slice(0, 150);
               this.logger.debug(`[tool_result] tool_use_id=${block.tool_use_id}  output: ${output}`);
+              // tool_result 不存
+              events.push({
+                type: 'tool_result',
+                ts: new Date().toISOString(),
+                persist: false,
+              });
             }
           }
         } else if (msg.type === 'system') {
@@ -185,6 +213,12 @@ export class ClaudeCodeProvider implements AgentProvider {
           } else if ('errors' in resultMsg) {
             const errorMsg = (resultMsg as any).errors?.join('; ') || '未知错误';
             this.logger.error(`Claude SDK 执行错误: ${errorMsg}`);
+            events.push({
+              type: 'error',
+              content: errorMsg,
+              ts: new Date().toISOString(),
+              persist: true,
+            });
             throw new Error(`Claude 执行错误: ${errorMsg}`);
           }
         }
@@ -199,7 +233,7 @@ export class ClaudeCodeProvider implements AgentProvider {
       // 更新会话时间
       session.updatedAt = Date.now();
 
-      return { text: resultText || '（无回复内容）' };
+      return { text: resultText || '（无回复内容）', events };
 
     } catch (error: any) {
       this.logger.error(`Claude SDK 调用失败: ${error.message}`);
@@ -237,5 +271,54 @@ export class ClaudeCodeProvider implements AgentProvider {
     this.sessions.clear();
     this.sdkSessionIds.clear();
     this.logger.info('Claude Code SDK provider 已销毁');
+  }
+
+  /** 生成 tool 调用的摘要（给人看的） */
+  private summarizeToolCall(name: string, input: any): string {
+    if (!input) return name;
+    switch (name) {
+      case 'Read':
+        return `Read ${input.file_path ?? ''}`;
+      case 'Write':
+        return `Write ${input.file_path ?? ''}`;
+      case 'Edit':
+        return `Edit ${input.file_path ?? ''}`;
+      case 'Bash':
+        return `Bash: ${(input.command ?? '').slice(0, 100)}`;
+      case 'Glob':
+        return `Glob ${input.pattern ?? ''}`;
+      case 'Grep':
+        return `Grep "${input.pattern ?? ''}"`;
+      case 'WebSearch':
+        return `WebSearch "${input.query ?? ''}"`;
+      case 'WebFetch':
+        return `WebFetch ${input.url ?? ''}`;
+      case 'Agent':
+        return `Agent: ${input.description ?? ''}`;
+      default:
+        return `${name}: ${JSON.stringify(input).slice(0, 100)}`;
+    }
+  }
+
+  /** 提取需要持久化的 tool 详情（diff、command 等） */
+  private extractToolDetail(name: string, input: any): string | undefined {
+    if (!input) return undefined;
+    switch (name) {
+      case 'Edit':
+        return JSON.stringify({
+          file: input.file_path,
+          old: input.old_string,
+          new: input.new_string,
+        });
+      case 'Write':
+        return JSON.stringify({
+          file: input.file_path,
+          contentLength: input.content?.length ?? 0,
+        });
+      case 'Bash':
+        return JSON.stringify({ command: input.command });
+      default:
+        return undefined;
+    }
   }
 }
