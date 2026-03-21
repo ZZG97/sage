@@ -12,6 +12,10 @@ user_invocable: true
 
 统一的记忆管理入口。根据用户意图判断子命令，然后读取对应文件获取详细指引。
 
+优先级规则：
+- 如果问题能直接通过已有日记回答，先读 `agent_home/memory/journals/` 下对应日记。
+- 只有当日记不存在、摘要不够、或用户明确要看完整对话时，才使用 `detail` 或 `query-history.ts` 回查数据库。
+
 | 意图 | 子命令 | 详细指引 |
 |---|---|---|
 | 写日记、总结今天、周记 | journal | 读取 `agent_home/.claude/skills/memory/commands/journal.md` |

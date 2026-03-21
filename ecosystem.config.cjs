@@ -6,7 +6,10 @@ module.exports = {
       script: 'caffeinate',
       args: '-i bun --env-file .env src/index.ts',
       cwd: __dirname,
-      env: { CLAUDE_CODE_WORK_DIR: __dirname + '/agent_home' },
+      env: {
+        CLAUDE_CODE_WORK_DIR: __dirname + '/agent_home',
+        CODEX_WORK_DIR: __dirname + '/agent_home',
+      },
       restart_delay: 3000,
       max_restarts: 10,
       out_file: 'logs/sage.log',
@@ -18,7 +21,10 @@ module.exports = {
       script: 'caffeinate',
       args: '-i bun --env-file .env.dev src/index.ts',
       cwd: __dirname,
-      env: { CLAUDE_CODE_WORK_DIR: __dirname + '/agent_home' },
+      env: {
+        CLAUDE_CODE_WORK_DIR: __dirname + '/agent_home',
+        CODEX_WORK_DIR: __dirname + '/agent_home',
+      },
       restart_delay: 3000,
       max_restarts: 10,
       out_file: 'logs/sage-dev.log',

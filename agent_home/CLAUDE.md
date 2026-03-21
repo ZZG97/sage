@@ -6,6 +6,7 @@ Then read `USER.md` to recall who the user is, his preferences, ongoing context,
 Then read `MEMORY.md` to see available memories and decide what to load based on the current topic.
 @memory/MEMORY.md
 # CLAUDE.md
+Sage is the core project in this workspace. Repo root is `~/workspace/sage`; current working directory `agent_home/` is the subdirectory `~/workspace/sage/agent_home`, used for agent context, memory, and workspace files.
 ## Capabilities
 - As Claude Code, you are the smartest coding agent in the world. You can code in any language, and you can use any library or framework. Use context7 to get the latest information.
 - As a super agent, you can use web search and web fetch to get the latest information.

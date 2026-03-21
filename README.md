@@ -93,7 +93,7 @@ FEISHU_APP_ID=your_app_id_here
 FEISHU_APP_SECRET=your_app_secret_here
 
 # === Agent 后端选择 ===
-# 'opencode' 或 'claude-code'
+# 'opencode'、'claude-code' 或 'codex'
 AGENT_PROVIDER=claude-code
 
 # --- OpenCode 配置（AGENT_PROVIDER=opencode 时）---
@@ -104,6 +104,11 @@ CLAUDE_CODE_WORK_DIR=/path/to/your/workspace
 CLAUDE_CODE_MAX_TURNS=25
 CLAUDE_CODE_MODEL=sonnet
 # CLAUDE_CODE_ALLOWED_TOOLS=Read,Bash,Edit,Grep,Glob,WebSearch,WebFetch
+
+# --- Codex 配置（AGENT_PROVIDER=codex 时）---
+CODEX_WORK_DIR=/path/to/your/workspace
+CODEX_MODEL=gpt-5.3-codex
+CODEX_SANDBOX_MODE=danger-full-access
 
 # === 服务器配置 ===
 PORT=3000
