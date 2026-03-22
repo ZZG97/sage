@@ -123,6 +123,7 @@ export class FallbackAgentProvider implements AgentProvider {
   private getProviderPrefix(name: string): string {
     switch (name) {
       case 'claude-code': return 'cc-';
+      case 'cc-minimax': return 'ccm-';
       case 'codex': return 'cdx-';
       case 'opencode': return 'oc-';
       default: return '';

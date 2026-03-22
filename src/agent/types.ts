@@ -83,4 +83,14 @@ export interface CodexProviderConfig {
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
 }
 
-export type AgentProviderConfig = OpenCodeProviderConfig | ClaudeCodeProviderConfig | CodexProviderConfig;
+export interface CcMinimaxProviderConfig {
+  type: 'cc-minimax';
+  workDir?: string;
+  maxTurns?: number;
+  allowedTools?: string[];
+  model?: string;         // MiniMax 模型名，如 'MiniMax-M2.7'
+  apiKey?: string;        // MiniMax API Key
+  baseUrl?: string;       // MiniMax 兼容 Anthropic 的 API 端点
+}
+
+export type AgentProviderConfig = OpenCodeProviderConfig | ClaudeCodeProviderConfig | CodexProviderConfig | CcMinimaxProviderConfig;

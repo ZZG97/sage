@@ -33,6 +33,17 @@ export function getAgentConfig(): AgentProviderConfig {
         model: process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-4-6',
       };
 
+    case 'cc-minimax':
+      return {
+        type: 'cc-minimax',
+        workDir: process.env.CLAUDE_CODE_WORK_DIR,
+        maxTurns: parseInt(process.env.CLAUDE_CODE_MAX_TURNS || '30', 10),
+        allowedTools: process.env.CLAUDE_CODE_ALLOWED_TOOLS?.split(',').filter(Boolean),
+        model: process.env.CC_MINIMAX_MODEL || 'MiniMax-M2.7',
+        apiKey: process.env.CC_MINIMAX_API_KEY || '',
+        baseUrl: process.env.CC_MINIMAX_BASE_URL || 'https://api.minimaxi.com/anthropic',
+      };
+
     case 'codex':
       return {
         type: 'codex',
@@ -65,6 +76,17 @@ export function getFallbackAgentConfig(): AgentProviderConfig | null {
         maxTurns: parseInt(process.env.CLAUDE_CODE_MAX_TURNS || '30', 10),
         allowedTools: process.env.CLAUDE_CODE_ALLOWED_TOOLS?.split(',').filter(Boolean),
         model: process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-4-6',
+      };
+
+    case 'cc-minimax':
+      return {
+        type: 'cc-minimax',
+        workDir: process.env.CLAUDE_CODE_WORK_DIR,
+        maxTurns: parseInt(process.env.CLAUDE_CODE_MAX_TURNS || '30', 10),
+        allowedTools: process.env.CLAUDE_CODE_ALLOWED_TOOLS?.split(',').filter(Boolean),
+        model: process.env.CC_MINIMAX_MODEL || 'MiniMax-M2.7',
+        apiKey: process.env.CC_MINIMAX_API_KEY || '',
+        baseUrl: process.env.CC_MINIMAX_BASE_URL || 'https://api.minimaxi.com/anthropic',
       };
 
     case 'codex':
