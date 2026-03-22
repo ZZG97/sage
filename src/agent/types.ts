@@ -26,6 +26,12 @@ export interface AgentResponse {
   metadata?: Record<string, unknown>;
 }
 
+// 流式结束事件（sendMessageStream 最后 yield）
+export interface AgentResultEvent extends AgentEvent {
+  type: 'result';
+  content: string; // 最终回复文本
+}
+
 // Agent Provider 接口 — 所有底层实现必须满足
 export interface AgentProvider {
   /** provider 名称，如 'opencode', 'claude-code' */
@@ -42,6 +48,9 @@ export interface AgentProvider {
 
   /** 发送消息并获取回复 */
   sendMessage(sessionId: string, message: string): Promise<AgentResponse>;
+
+  /** 流式发送消息，逐步 yield AgentEvent，最后 yield type='result' 事件 */
+  sendMessageStream(sessionId: string, message: string): AsyncGenerator<AgentEvent>;
 
   /** 删除会话 */
   deleteSession(sessionId: string): Promise<void>;

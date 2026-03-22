@@ -1,6 +1,6 @@
 // FallbackAgentProvider — 包装 primary + fallback 两个 provider，异常自动降级
 
-import { AgentProvider, AgentSession, AgentResponse } from './types';
+import { AgentProvider, AgentSession, AgentResponse, AgentEvent } from './types';
 import { Logger } from '../utils';
 
 export class FallbackAgentProvider implements AgentProvider {
@@ -43,29 +43,47 @@ export class FallbackAgentProvider implements AgentProvider {
   }
 
   async sendMessage(sessionId: string, message: string): Promise<AgentResponse> {
+    const events: AgentEvent[] = [];
+    let resultText = '';
+
+    for await (const event of this.sendMessageStream(sessionId, message)) {
+      events.push(event);
+      if (event.type === 'result') resultText = event.content || '';
+    }
+
+    return { text: resultText || '（无回复内容）', events };
+  }
+
+  async *sendMessageStream(sessionId: string, message: string): AsyncGenerator<AgentEvent> {
     const provider = this.routeProvider(sessionId);
 
     try {
-      return await provider.sendMessage(sessionId, message);
+      yield* provider.sendMessageStream(sessionId, message);
     } catch (err: any) {
-      // 已经在 fallback 上或不可降级，直接抛
       if (provider === this.fallback || !this.isFallbackEligible(err)) {
         throw err;
       }
 
-      this.logger.warn(`Primary (${this.primary.name}) sendMessage 失败，降级到 ${this.fallback.name}: ${err.message}`);
+      this.logger.warn(`Primary (${this.primary.name}) sendMessageStream 失败，降级到 ${this.fallback.name}: ${err.message}`);
 
-      // 在 fallback 上创建新 session 并发送消息
       const newSession = await this.fallback.createSession();
-      const response = await this.fallback.sendMessage(newSession.id, message);
 
-      // 通过 metadata 通知 SageCore 更新 DB
-      response.metadata = { ...response.metadata, newSessionId: newSession.id };
+      // yield 降级提示事件
+      yield {
+        type: 'text',
+        content: `⚠️ ${this.primary.name} 异常，已自动切换到 ${this.fallback.name}`,
+        ts: new Date().toISOString(),
+        persist: true,
+      };
 
-      // 在回复前加降级提示
-      response.text = `⚠️ ${this.primary.name} 异常，已自动切换到 ${this.fallback.name}\n\n${response.text}`;
-
-      return response;
+      // 代理 fallback 的流式输出，拦截 result 事件注入 metadata
+      for await (const event of this.fallback.sendMessageStream(newSession.id, message)) {
+        if (event.type === 'result') {
+          // 注入 newSessionId metadata（通过特殊字段，SageCore 检查）
+          (event as any).metadata = { newSessionId: newSession.id };
+        }
+        yield event;
+      }
     }
   }
 

@@ -31,15 +31,23 @@ export interface FeishuTextContent {
   text: string;
 }
 
+// 消息附件（图片/文件）
+export interface MessageAttachment {
+  type: 'image' | 'file';
+  path: string;       // 本地存储路径（相对于 agent_home）
+  name?: string;       // 原始文件名
+}
+
 // 消息上下文 - 传递给消息处理器的完整上下文
 export interface MessageContext {
-  text: string; // 消息文本内容
+  text: string; // 消息文本内容（图片→ ![image](path), 文件→ 描述文本）
   openId: string; // 发送者的 open_id
   chatId: string; // 聊天ID
   messageId: string; // 消息ID
   chatType: 'p2p' | 'group'; // 聊天类型
   threadId?: string; // 话题ID（如果在话题中回复）
   rootId?: string; // 根消息ID（话题的第一条消息）
+  attachments?: MessageAttachment[]; // 附件列表
 }
 
 // OpenCode 相关类型

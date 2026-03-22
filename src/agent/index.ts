@@ -7,7 +7,7 @@ import { CodexProvider } from './codex-provider';
 import { CcMinimaxProvider } from './cc-minimax-provider';
 import { FallbackAgentProvider } from './fallback-provider';
 
-export type { AgentProvider, AgentSession, AgentResponse, AgentProviderConfig } from './types';
+export type { AgentProvider, AgentSession, AgentResponse, AgentEvent, AgentProviderConfig } from './types';
 export { OpenCodeProvider } from './opencode-provider';
 export { ClaudeCodeProvider } from './claude-code-provider';
 export { CodexProvider } from './codex-provider';

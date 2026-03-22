@@ -3,7 +3,7 @@
 
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
-import { AgentProvider, AgentSession, AgentResponse, AgentEvent, CcMinimaxProviderConfig } from './types';
+import { AgentProvider, AgentSession, AgentResponse, AgentEvent, AgentResultEvent, CcMinimaxProviderConfig } from './types';
 import { Logger } from '../utils';
 
 export class CcMinimaxProvider implements AgentProvider {
@@ -16,6 +16,8 @@ export class CcMinimaxProvider implements AgentProvider {
   private workDir: string;
   private maxTurns: number;
   private allowedTools: string[];
+  // MiniMax API 不兼容的工具（搜索请求会路由到 MiniMax 端点导致 400）
+  private static readonly DISABLED_TOOLS = ['WebSearch'];
   private model: string;
   private apiKey: string;
   private baseUrl: string;
@@ -115,6 +117,18 @@ export class CcMinimaxProvider implements AgentProvider {
   }
 
   async sendMessage(sessionId: string, message: string): Promise<AgentResponse> {
+    const events: AgentEvent[] = [];
+    let resultText = '';
+
+    for await (const event of this.sendMessageStream(sessionId, message)) {
+      events.push(event);
+      if (event.type === 'result') resultText = event.content || '';
+    }
+
+    return { text: resultText || '（无回复内容）', events };
+  }
+
+  async *sendMessageStream(sessionId: string, message: string): AsyncGenerator<AgentEvent> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`会话不存在: ${sessionId}`);
@@ -133,8 +147,9 @@ export class CcMinimaxProvider implements AgentProvider {
     };
 
     if (this.allowedTools.length > 0) {
-      options.allowedTools = this.allowedTools;
+      options.allowedTools = this.allowedTools.filter(t => !CcMinimaxProvider.DISABLED_TOOLS.includes(t));
     }
+    options.disallowedTools = CcMinimaxProvider.DISABLED_TOOLS;
 
     const sdkSessionId = this.sdkSessionIds.get(sessionId);
     if (sdkSessionId) {
@@ -144,12 +159,10 @@ export class CcMinimaxProvider implements AgentProvider {
     this.logger.info(`调用 CC-MiniMax, message 长度: ${message.length}, model: ${this.model}, resume: ${sdkSessionId || '新会话'}`);
 
     try {
-      // 在 MiniMax 环境变量下 spawn subprocess
       const q = this.withMinimaxEnv(() => claudeQuery({ prompt: message, options }));
 
       let resultText = '';
       let newSdkSessionId = '';
-      const events: AgentEvent[] = [];
 
       for await (const msg of q) {
         if ('session_id' in msg && msg.session_id) {
@@ -161,42 +174,28 @@ export class CcMinimaxProvider implements AgentProvider {
           for (const block of content) {
             if (block.type === 'text' && block.text?.trim()) {
               this.logger.debug(`[assistant] ${block.text.slice(0, 200)}`);
-              events.push({
-                type: 'text',
-                content: block.text,
-                ts: new Date().toISOString(),
-                persist: true,
-              });
+              yield { type: 'text', content: block.text, ts: new Date().toISOString(), persist: true };
             } else if (block.type === 'tool_use') {
               const input = JSON.stringify(block.input ?? {}).slice(0, 150);
               this.logger.info(`[tool_use] ${block.name}  input: ${input}`);
-              events.push({
+              yield {
                 type: 'tool_call',
                 toolName: block.name,
                 content: this.summarizeToolCall(block.name, block.input),
                 toolDetail: this.extractToolDetail(block.name, block.input),
                 ts: new Date().toISOString(),
                 persist: true,
-              });
+              };
             } else if (block.type === 'thinking') {
-              events.push({
-                type: 'thinking',
-                ts: new Date().toISOString(),
-                persist: false,
-              });
+              yield { type: 'thinking', ts: new Date().toISOString(), persist: false };
             }
           }
         } else if (msg.type === 'user') {
           const content = (msg as any).message?.content ?? [];
           for (const block of content) {
             if (block.type === 'tool_result') {
-              const output = JSON.stringify(block.content ?? '').slice(0, 150);
-              this.logger.debug(`[tool_result] tool_use_id=${block.tool_use_id}  output: ${output}`);
-              events.push({
-                type: 'tool_result',
-                ts: new Date().toISOString(),
-                persist: false,
-              });
+              this.logger.debug(`[tool_result] tool_use_id=${block.tool_use_id}`);
+              yield { type: 'tool_result', ts: new Date().toISOString(), persist: false };
             }
           }
         } else if (msg.type === 'system') {
@@ -208,12 +207,7 @@ export class CcMinimaxProvider implements AgentProvider {
           } else if ('errors' in resultMsg) {
             const errorMsg = (resultMsg as any).errors?.join('; ') || '未知错误';
             this.logger.error(`CC-MiniMax 执行错误: ${errorMsg}`);
-            events.push({
-              type: 'error',
-              content: errorMsg,
-              ts: new Date().toISOString(),
-              persist: true,
-            });
+            yield { type: 'error', content: errorMsg, ts: new Date().toISOString(), persist: true };
             throw new Error(`CC-MiniMax 执行错误: ${errorMsg}`);
           }
         }
@@ -225,7 +219,7 @@ export class CcMinimaxProvider implements AgentProvider {
       }
 
       session.updatedAt = Date.now();
-      return { text: resultText || '（无回复内容）', events };
+      yield { type: 'result', content: resultText || '（无回复内容）', ts: new Date().toISOString(), persist: false };
 
     } catch (error: any) {
       this.logger.error(`CC-MiniMax 调用失败: ${error.message}`);

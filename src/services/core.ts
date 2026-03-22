@@ -1,5 +1,6 @@
 import { FeishuService } from './feishu';
 import { AgentProvider } from '../agent';
+import type { AgentEvent } from '../agent/types';
 import type { HistoryStore } from './history-store';
 import { Logger, AppError } from '../utils';
 import { appConfig } from '../config';
@@ -21,7 +22,7 @@ export class SageCore {
     this.historyStore = historyStore;
     this.feishuService = new FeishuService(appConfig.feishu);
 
-    // 设置飞书消息处理器
+    // 设置飞书消息处理器（不再返回 string，SageCore 自行控制卡片）
     this.feishuService.setMessageHandler(this.handleFeishuMessage.bind(this));
 
     // 回复后飞书创建 thread 时，迁移 session 映射
@@ -32,15 +33,20 @@ export class SageCore {
     });
   }
 
-  // 处理飞书消息（主入口）
-  private async handleFeishuMessage(ctx: MessageContext): Promise<string> {
+  // 处理飞书消息（主入口）— 流式卡片生命周期
+  private async handleFeishuMessage(ctx: MessageContext): Promise<void> {
     try {
-      this.logger.info(`处理消息: openId=${ctx.openId}, threadId=${ctx.threadId || '无'}, text="${ctx.text}"`);
+      this.logger.info(`处理消息: openId=${ctx.openId}, threadId=${ctx.threadId || '无'}, text="${ctx.text.slice(0, 100)}"`);
 
       // 检查是否为斜杠命令
       const commandResult = this.handleSlashCommand(ctx);
       if (commandResult !== null) {
-        return commandResult;
+        // 命令结果用简单卡片回复
+        await this.feishuService.replyCard(
+          ctx.messageId,
+          this.feishuService.buildStreamingCard([], false, commandResult),
+        );
+        return;
       }
 
       // 预处理消息
@@ -50,7 +56,7 @@ export class SageCore {
       const threadKey = this.resolveThreadKey(ctx);
       const sessionId = await this.getOrCreateThreadSession(threadKey, ctx);
 
-      // 记录用户消息（同时持久化 agentSessionId 映射）
+      // 记录用户消息
       this.historyStore.saveUserMessage(threadKey, this.agent.name, processedMessage, {
         openId: ctx.openId,
         chatId: ctx.chatId,
@@ -58,68 +64,120 @@ export class SageCore {
         agentSessionId: sessionId,
       });
 
-      // 发送到 Agent 处理
-      const response = await this.agent.sendMessage(sessionId, processedMessage);
+      // Step 1: 发送初始 "thinking" 卡片
+      const initialCard = this.feishuService.buildStreamingCard([], true);
+      const { messageId: replyMessageId } = await this.feishuService.replyCard(ctx.messageId, initialCard);
 
-      // 检查是否发生了 fallback（新 sessionId 通过 metadata 传回）
-      if (response.metadata?.newSessionId) {
-        const newSessionId = response.metadata.newSessionId as string;
+      if (!replyMessageId) {
+        this.logger.error('发送初始卡片失败，无 messageId');
+        return;
+      }
+
+      // Step 2: 流式处理 agent 消息
+      const allEvents: AgentEvent[] = [];
+      let resultText = '';
+      let newSessionId: string | undefined;
+      let lastPatchTime = 0;
+      const PATCH_INTERVAL = 1500; // 最小 PATCH 间隔 ms，避免频率过高
+
+      try {
+        for await (const event of this.agent.sendMessageStream(sessionId, processedMessage)) {
+          allEvents.push(event);
+
+          // 检查 fallback metadata
+          if ((event as any).metadata?.newSessionId) {
+            newSessionId = (event as any).metadata.newSessionId;
+          }
+
+          if (event.type === 'result') {
+            resultText = event.content || '';
+            continue;
+          }
+
+          // 节流 PATCH：对可见事件（tool_call/thinking/text）触发更新
+          if (event.type === 'tool_call' || event.type === 'thinking' || event.type === 'text') {
+            const now = Date.now();
+            if (now - lastPatchTime >= PATCH_INTERVAL) {
+              const card = this.feishuService.buildStreamingCard(allEvents, true);
+              await this.feishuService.patchCard(replyMessageId, card).catch(err => {
+                this.logger.warn('PATCH 卡片失败:', err);
+              });
+              lastPatchTime = now;
+            }
+          }
+        }
+      } catch (error: any) {
+        this.logger.error('Agent 流式处理异常:', error);
+        resultText = resultText || `处理出错: ${error.message}`;
+      }
+
+      // Step 3: 处理 fallback session 迁移
+      if (newSessionId) {
         this.historyStore.updateAgentSessionId(threadKey, newSessionId);
         this.restoredSessions.add(newSessionId);
         this.logger.info(`Fallback 更新会话: ${threadKey} -> ${newSessionId}`);
       }
 
-      // 持久化 resume_id（SDK 会话 ID，用于重启恢复）
-      const effectiveSessionId = (response.metadata?.newSessionId as string) ?? sessionId;
+      // 持久化 resume_id
+      const effectiveSessionId = newSessionId ?? sessionId;
       const resumeId = this.agent.getResumeId(effectiveSessionId);
       if (resumeId) {
         this.historyStore.updateResumeId(threadKey, resumeId);
       }
 
       // 记录 agent 事件
-      this.historyStore.saveAgentEvents(threadKey, this.agent.name, response.events);
+      this.historyStore.saveAgentEvents(threadKey, this.agent.name, allEvents);
 
-      // 后处理回复
-      const processedResponse = this.postprocessResponse(response.text);
+      // Step 4: 最终卡片更新（处理图片 + 关闭流式）
+      let finalText = resultText;
+      try {
+        finalText = await this.feishuService.processImagesInMarkdown(finalText);
+      } catch (err) {
+        this.logger.warn('处理回复中的图片失败:', err);
+      }
 
-      this.logger.info(`处理完成，回复长度: ${processedResponse.length}`);
-      return processedResponse;
+      const finalCard = this.feishuService.buildStreamingCard(allEvents, false, finalText);
+      await this.feishuService.patchCard(replyMessageId, finalCard).catch(err => {
+        this.logger.warn('最终 PATCH 卡片失败:', err);
+      });
+
+      // Step 5: 发送本地文件附件
+      try {
+        await this.feishuService.sendLocalFileAttachments(replyMessageId, finalText);
+      } catch (err) {
+        this.logger.warn('发送文件附件失败:', err);
+      }
+
+      this.logger.info(`处理完成，回复长度: ${resultText.length}`);
 
     } catch (error) {
       this.logger.error('处理消息失败:', error);
 
       if (error instanceof AppError) {
-        return `抱歉，处理消息时出现错误: ${error.message}`;
+        // 尝试发送错误卡片
+        try {
+          await this.feishuService.replyCard(
+            ctx.messageId,
+            this.feishuService.buildErrorCard(`抱歉，处理消息时出现错误: ${error.message}`),
+          );
+        } catch { /* ignore */ }
       }
-
-      return '抱歉，处理消息时出现未知错误，请稍后再试';
     }
   }
 
-  // 斜杠命令处理
+  // ─── 斜杠命令 ───
+
   private handleSlashCommand(ctx: MessageContext): string | null {
     const text = ctx.text.trim();
 
-    if (text === '/thread_id') {
-      return this.cmdThreadId(ctx);
-    }
-
-    if (text === '/clear') {
-      return this.cmdClear(ctx);
-    }
-
-    if (text === '/help') {
-      return this.cmdHelp();
-    }
-
-    if (text === '/status') {
-      return this.cmdStatus();
-    }
+    if (text === '/thread_id') return this.cmdThreadId(ctx);
+    if (text === '/clear') return this.cmdClear(ctx);
+    if (text === '/help') return this.cmdHelp();
+    if (text === '/status') return this.cmdStatus();
 
     return null;
   }
 
-  // /thread_id - 回复当前 THREAD ID
   private cmdThreadId(ctx: MessageContext): string {
     const threadKey = this.resolveThreadKey(ctx);
     const session = this.historyStore.getSession(threadKey);
@@ -138,7 +196,6 @@ export class SageCore {
     return `当前不在话题中。消息 ID: ${ctx.messageId}`;
   }
 
-  // /clear - 清空当前 thread 上下文
   private cmdClear(ctx: MessageContext): string {
     const threadKey = this.resolveThreadKey(ctx);
     const session = this.historyStore.getSession(threadKey);
@@ -156,7 +213,6 @@ export class SageCore {
     return '当前话题没有活跃的上下文。';
   }
 
-  // /help - 帮助信息
   private cmdHelp(): string {
     return [
       '可用命令:',
@@ -174,7 +230,6 @@ export class SageCore {
     ].join('\n');
   }
 
-  // /status - 服务状态
   private cmdStatus(): string {
     const status = this.getStatus();
     return [
@@ -184,18 +239,16 @@ export class SageCore {
     ].join('\n');
   }
 
-  // 解析 thread key
+  // ─── 会话管理 ───
+
   private resolveThreadKey(ctx: MessageContext): string {
     return ctx.threadId || `msg:${ctx.messageId}`;
   }
 
-  // 获取或创建 Thread 对应的 Agent 会话（DB 为唯一 source of truth）
   private async getOrCreateThreadSession(threadKey: string, ctx: MessageContext): Promise<string> {
-    // 查 DB：该 threadKey 是否已有关联的 agent session
     const row = this.historyStore.getSession(threadKey);
 
     if (row?.agent_session_id) {
-      // 懒恢复：首次使用时在 provider 侧注册
       if (!this.restoredSessions.has(row.agent_session_id)) {
         try {
           await this.agent.restoreSession(row.agent_session_id, row.resume_id || undefined);
@@ -203,7 +256,6 @@ export class SageCore {
           this.logger.info(`懒恢复会话: ${threadKey} -> ${row.agent_session_id}`);
         } catch (err) {
           this.logger.warn(`恢复会话失败，将创建新会话: ${row.agent_session_id}`, err);
-          // 恢复失败，走下面的创建逻辑
           return this.createNewSession(threadKey, ctx);
         }
       } else {
@@ -212,11 +264,9 @@ export class SageCore {
       return row.agent_session_id;
     }
 
-    // 没有已有 session，创建新的
     return this.createNewSession(threadKey, ctx);
   }
 
-  // 创建新 agent session 并关联到 threadKey
   private async createNewSession(threadKey: string, ctx: MessageContext): Promise<string> {
     const session = await this.agent.createSession();
     this.restoredSessions.add(session.id);
@@ -224,20 +274,12 @@ export class SageCore {
     return session.id;
   }
 
-  // 消息预处理
   private preprocessMessage(message: string): string {
     return message.trim();
   }
 
-  // 回复后处理
-  private postprocessResponse(response: string): string {
-    if (response.length > 2000) {
-      response = response.substring(0, 2000) + '...';
-    }
-    return response;
-  }
+  // ─── 服务生命周期 ───
 
-  // 启动服务
   async start(): Promise<void> {
     if (this.isRunning) {
       this.logger.warn('服务已经在运行中');
@@ -246,16 +288,10 @@ export class SageCore {
 
     try {
       this.logger.info(`正在启动 Sage (agent: ${this.agent.name})...`);
-
-      // 初始化 Agent Provider
       await this.agent.initialize();
-
-      // 启动飞书服务
       await this.feishuService.start();
-
       this.isRunning = true;
       this.logger.info('Sage 核心服务启动成功');
-
       this.setupCleanupTask();
     } catch (error) {
       this.logger.error('启动服务失败:', error);
@@ -263,7 +299,6 @@ export class SageCore {
     }
   }
 
-  // 停止服务
   async stop(): Promise<void> {
     if (!this.isRunning) {
       this.logger.warn('服务未在运行');
@@ -278,18 +313,16 @@ export class SageCore {
       this.logger.info('Sage 已停止');
     } catch (error) {
       this.logger.error('停止服务失败:', error);
-      throw error;
     }
   }
 
-  // 设置清理任务
   private setupCleanupTask(): void {
-    const cleanupInterval = 6 * 60 * 60 * 1000; // 6小时
+    const cleanupInterval = 6 * 60 * 60 * 1000;
 
     setInterval(async () => {
       try {
         await this.agent.cleanupSessions(24 * 60 * 60 * 1000);
-        this.restoredSessions.clear(); // 清理后重置，下次使用会重新 restore
+        this.restoredSessions.clear();
       } catch (error) {
         this.logger.error('清理过期会话失败:', error);
       }
@@ -298,7 +331,6 @@ export class SageCore {
     this.logger.info('已设置会话清理任务');
   }
 
-  // 获取服务状态
   getStatus(): {
     isRunning: boolean;
     agentProvider: string;
@@ -311,7 +343,6 @@ export class SageCore {
     };
   }
 
-  // 手动清理会话
   async cleanupSessions(): Promise<number> {
     const maxAge = 24 * 60 * 60 * 1000;
     const cleaned = await this.agent.cleanupSessions(maxAge);

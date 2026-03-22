@@ -72,12 +72,23 @@ export class CodexProvider implements AgentProvider {
   }
 
   async sendMessage(sessionId: string, message: string): Promise<AgentResponse> {
+    const events: AgentEvent[] = [];
+    let resultText = '';
+
+    for await (const event of this.sendMessageStream(sessionId, message)) {
+      events.push(event);
+      if (event.type === 'result') resultText = event.content || '';
+    }
+
+    return { text: resultText || '（无回复内容）', events };
+  }
+
+  async *sendMessageStream(sessionId: string, message: string): AsyncGenerator<AgentEvent> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`会话不存在: ${sessionId}`);
     }
 
-    // 获取或创建 thread
     let thread = this.threads.get(sessionId);
     const existingThreadId = this.threadIds.get(sessionId);
 
@@ -91,7 +102,6 @@ export class CodexProvider implements AgentProvider {
       };
 
       if (existingThreadId) {
-        // resume 之前的 thread
         thread = this.codex.resumeThread(existingThreadId, threadOptions);
         this.logger.info(`恢复 Codex thread: ${existingThreadId}`);
       } else {
@@ -104,47 +114,33 @@ export class CodexProvider implements AgentProvider {
     this.logger.info(`调用 Codex, message 长度: ${message.length}`);
 
     try {
-      const events: AgentEvent[] = [];
       const { events: eventStream } = await thread.runStreamed(message);
-
       let resultText = '';
 
       for await (const event of eventStream) {
-        // 记录 thread_id
         if (event.type === 'thread.started') {
           this.threadIds.set(sessionId, event.thread_id);
           this.logger.info(`Codex thread ID: ${event.thread_id}`);
         }
 
-        // item 完成时收集事件
         if (event.type === 'item.completed') {
           const item = event.item;
           const agentEvent = this.itemToEvent(item);
-          if (agentEvent) {
-            events.push(agentEvent);
-          }
+          if (agentEvent) yield agentEvent;
 
-          // 提取最终回复文本
           if (item.type === 'agent_message') {
             resultText = item.text;
           }
         }
 
-        // item 进行中时打印日志
         if (event.type === 'item.started') {
           this.logItemStarted(event.item);
         }
 
-        // 错误处理
         if (event.type === 'turn.failed') {
           const errorMsg = event.error.message;
           this.logger.error(`Codex turn 失败: ${errorMsg}`);
-          events.push({
-            type: 'error',
-            content: errorMsg,
-            ts: new Date().toISOString(),
-            persist: true,
-          });
+          yield { type: 'error', content: errorMsg, ts: new Date().toISOString(), persist: true };
           throw new Error(`Codex 执行错误: ${errorMsg}`);
         }
 
@@ -152,7 +148,6 @@ export class CodexProvider implements AgentProvider {
           this.logger.error(`Codex stream 错误: ${event.message}`);
         }
 
-        // token 使用统计
         if (event.type === 'turn.completed') {
           const u = event.usage;
           this.logger.info(`Codex tokens — in: ${u.input_tokens}, cached: ${u.cached_input_tokens}, out: ${u.output_tokens}`);
@@ -160,10 +155,9 @@ export class CodexProvider implements AgentProvider {
       }
 
       session.updatedAt = Date.now();
-      return { text: resultText || '（无回复内容）', events };
+      yield { type: 'result', content: resultText || '（无回复内容）', ts: new Date().toISOString(), persist: false };
 
     } catch (error: any) {
-      // thread 出错后清理，下次重新创建
       this.threads.delete(sessionId);
       this.logger.error(`Codex 调用失败: ${error.message}`);
       throw error;

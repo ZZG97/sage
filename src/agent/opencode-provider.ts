@@ -1,7 +1,7 @@
 // OpenCode Provider — 封装现有的 OpenCode 逻辑
 
 import { createOpencodeClient } from '@opencode-ai/sdk';
-import { AgentProvider, AgentSession, AgentResponse, OpenCodeProviderConfig } from './types';
+import { AgentProvider, AgentSession, AgentResponse, AgentEvent, OpenCodeProviderConfig } from './types';
 import { Logger } from '../utils';
 
 export class OpenCodeProvider implements AgentProvider {
@@ -54,6 +54,18 @@ export class OpenCodeProvider implements AgentProvider {
   }
 
   async sendMessage(sessionId: string, message: string): Promise<AgentResponse> {
+    const events: AgentEvent[] = [];
+    let resultText = '';
+
+    for await (const event of this.sendMessageStream(sessionId, message)) {
+      events.push(event);
+      if (event.type === 'result') resultText = event.content || '';
+    }
+
+    return { text: resultText || '（无回复内容）', events };
+  }
+
+  async *sendMessageStream(sessionId: string, message: string): AsyncGenerator<AgentEvent> {
     const response = await this.client.session.prompt({
       body: { parts: [{ type: 'text', text: message }] },
       path: { id: sessionId },
@@ -65,19 +77,11 @@ export class OpenCodeProvider implements AgentProvider {
 
     const text = this.extractText(response.data);
 
-    // 更新会话活跃时间
     const session = this.sessions.get(sessionId);
     if (session) session.updatedAt = Date.now();
 
-    return {
-      text,
-      events: [{
-        type: 'text',
-        content: text,
-        ts: new Date().toISOString(),
-        persist: true,
-      }],
-    };
+    yield { type: 'text', content: text, ts: new Date().toISOString(), persist: true };
+    yield { type: 'result', content: text, ts: new Date().toISOString(), persist: false };
   }
 
   getResumeId(_sessionId: string): string | undefined {

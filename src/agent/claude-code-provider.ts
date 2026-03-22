@@ -82,32 +82,41 @@ export class ClaudeCodeProvider implements AgentProvider {
   }
 
   async sendMessage(sessionId: string, message: string): Promise<AgentResponse> {
+    const events: AgentEvent[] = [];
+    let resultText = '';
+
+    for await (const event of this.sendMessageStream(sessionId, message)) {
+      events.push(event);
+      if (event.type === 'result') {
+        resultText = event.content || '';
+      }
+    }
+
+    return { text: resultText || '（无回复内容）', events };
+  }
+
+  async *sendMessageStream(sessionId: string, message: string): AsyncGenerator<AgentEvent> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`会话不存在: ${sessionId}`);
     }
 
-    // 构建 query options
     const options: Record<string, any> = {
       cwd: this.workDir,
       model: this.model,
       maxTurns: this.maxTurns,
       permissionMode: 'bypassPermissions' as const,
       allowDangerouslySkipPermissions: true,
-      // 加载 agent_home 下的 CLAUDE.md 和 .claude/settings.json
       settingSources: ['project' as const],
-      // 用 claude_code preset + 追加小克身份
       systemPrompt: this.systemPromptAppend
         ? { type: 'preset' as const, preset: 'claude_code' as const, append: this.systemPromptAppend }
         : { type: 'preset' as const, preset: 'claude_code' as const },
     };
 
-    // 如果有允许的工具列表
     if (this.allowedTools.length > 0) {
       options.allowedTools = this.allowedTools;
     }
 
-    // 多轮对话：resume 之前的 SDK session
     const sdkSessionId = this.sdkSessionIds.get(sessionId);
     if (sdkSessionId) {
       options.resume = sdkSessionId;
@@ -116,64 +125,50 @@ export class ClaudeCodeProvider implements AgentProvider {
     this.logger.info(`调用 Claude SDK, message 长度: ${message.length}, resume: ${sdkSessionId || '新会话'}`);
 
     try {
-      // 调用 SDK query
       const q = claudeQuery({ prompt: message, options });
 
       let resultText = '';
       let newSdkSessionId = '';
-      const events: AgentEvent[] = [];
 
-      // 消费 stream，收集结果和事件
       for await (const msg of q) {
-        // 记录 session_id 用于后续 resume
         if ('session_id' in msg && msg.session_id) {
           newSdkSessionId = msg.session_id;
         }
 
-        // 打印中间过程，方便观测卡住时的状态
         if (msg.type === 'assistant') {
           const content = (msg as any).message?.content ?? [];
           for (const block of content) {
             if (block.type === 'text' && block.text?.trim()) {
               this.logger.debug(`[assistant] ${block.text.slice(0, 200)}`);
-              events.push({
+              const event: AgentEvent = {
                 type: 'text',
                 content: block.text,
                 ts: new Date().toISOString(),
                 persist: true,
-              });
+              };
+              yield event;
             } else if (block.type === 'tool_use') {
               const input = JSON.stringify(block.input ?? {}).slice(0, 150);
               this.logger.info(`[tool_use] ${block.name}  input: ${input}`);
-              events.push({
+              const event: AgentEvent = {
                 type: 'tool_call',
                 toolName: block.name,
                 content: this.summarizeToolCall(block.name, block.input),
                 toolDetail: this.extractToolDetail(block.name, block.input),
                 ts: new Date().toISOString(),
                 persist: true,
-              });
+              };
+              yield event;
             } else if (block.type === 'thinking') {
-              // thinking 不存
-              events.push({
-                type: 'thinking',
-                ts: new Date().toISOString(),
-                persist: false,
-              });
+              yield { type: 'thinking', ts: new Date().toISOString(), persist: false };
             }
           }
         } else if (msg.type === 'user') {
           const content = (msg as any).message?.content ?? [];
           for (const block of content) {
             if (block.type === 'tool_result') {
-              const output = JSON.stringify(block.content ?? '').slice(0, 150);
-              this.logger.debug(`[tool_result] tool_use_id=${block.tool_use_id}  output: ${output}`);
-              // tool_result 不存
-              events.push({
-                type: 'tool_result',
-                ts: new Date().toISOString(),
-                persist: false,
-              });
+              this.logger.debug(`[tool_result] tool_use_id=${block.tool_use_id}`);
+              yield { type: 'tool_result', ts: new Date().toISOString(), persist: false };
             }
           }
         } else if (msg.type === 'system') {
@@ -185,27 +180,21 @@ export class ClaudeCodeProvider implements AgentProvider {
           } else if ('errors' in resultMsg) {
             const errorMsg = (resultMsg as any).errors?.join('; ') || '未知错误';
             this.logger.error(`Claude SDK 执行错误: ${errorMsg}`);
-            events.push({
-              type: 'error',
-              content: errorMsg,
-              ts: new Date().toISOString(),
-              persist: true,
-            });
+            yield { type: 'error', content: errorMsg, ts: new Date().toISOString(), persist: true };
             throw new Error(`Claude 执行错误: ${errorMsg}`);
           }
         }
       }
 
-      // 保存 SDK session ID 用于多轮
       if (newSdkSessionId) {
         this.sdkSessionIds.set(sessionId, newSdkSessionId);
         this.logger.info(`SDK session ID 已记录: ${newSdkSessionId}`);
       }
 
-      // 更新会话时间
       session.updatedAt = Date.now();
 
-      return { text: resultText || '（无回复内容）', events };
+      // 最后 yield result 事件
+      yield { type: 'result', content: resultText || '（无回复内容）', ts: new Date().toISOString(), persist: false };
 
     } catch (error: any) {
       this.logger.error(`Claude SDK 调用失败: ${error.message}`);
