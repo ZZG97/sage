@@ -5,14 +5,6 @@ import { Logger, AppError } from '../utils';
 import { appConfig } from '../config';
 import { MessageContext } from '../types';
 
-// Thread 会话信息
-interface ThreadSession {
-  sessionId: string; // Agent 会话ID
-  openId: string; // 创建者的 open_id
-  createdAt: number;
-  lastActiveAt: number;
-}
-
 export class SageCore {
   private feishuService: FeishuService;
   private agent: AgentProvider;
@@ -20,8 +12,8 @@ export class SageCore {
   private logger: Logger;
   private isRunning: boolean = false;
 
-  // Thread 隔离的会话管理
-  private threadSessions: Map<string, ThreadSession> = new Map();
+  // 已在 provider 中恢复过的 session（避免重复 restoreSession）
+  private restoredSessions: Set<string> = new Set();
 
   constructor(agent: AgentProvider, historyStore: HistoryStore) {
     this.logger = new Logger('SageCore');
@@ -35,15 +27,8 @@ export class SageCore {
     // 回复后飞书创建 thread 时，迁移 session 映射
     this.feishuService.setThreadCreatedHandler((messageId, threadId) => {
       const msgKey = `msg:${messageId}`;
-      const session = this.threadSessions.get(msgKey);
-      if (session) {
-        this.threadSessions.set(threadId, session);
-        this.threadSessions.delete(msgKey);
-        this.logger.info(`迁移 thread 会话: ${msgKey} -> ${threadId} (session: ${session.sessionId})`);
-
-        // 同步迁移历史记录的 session_id
-        this.historyStore.migrateSessionId(msgKey, threadId);
-      }
+      this.historyStore.migrateSessionId(msgKey, threadId);
+      this.logger.info(`迁移 thread 会话: ${msgKey} -> ${threadId}`);
     });
   }
 
@@ -62,27 +47,40 @@ export class SageCore {
       const processedMessage = this.preprocessMessage(ctx.text);
 
       // 获取或创建 Thread 对应的会话
-      const sessionId = await this.getOrCreateThreadSession(ctx);
-
-      // 记录用户消息
       const threadKey = this.resolveThreadKey(ctx);
+      const sessionId = await this.getOrCreateThreadSession(threadKey, ctx);
+
+      // 记录用户消息（同时持久化 agentSessionId 映射）
       this.historyStore.saveUserMessage(threadKey, this.agent.name, processedMessage, {
         openId: ctx.openId,
         chatId: ctx.chatId,
         chatType: ctx.chatType,
+        agentSessionId: sessionId,
       });
 
       // 发送到 Agent 处理
       const response = await this.agent.sendMessage(sessionId, processedMessage);
+
+      // 检查是否发生了 fallback（新 sessionId 通过 metadata 传回）
+      if (response.metadata?.newSessionId) {
+        const newSessionId = response.metadata.newSessionId as string;
+        this.historyStore.updateAgentSessionId(threadKey, newSessionId);
+        this.restoredSessions.add(newSessionId);
+        this.logger.info(`Fallback 更新会话: ${threadKey} -> ${newSessionId}`);
+      }
+
+      // 持久化 resume_id（SDK 会话 ID，用于重启恢复）
+      const effectiveSessionId = (response.metadata?.newSessionId as string) ?? sessionId;
+      const resumeId = this.agent.getResumeId(effectiveSessionId);
+      if (resumeId) {
+        this.historyStore.updateResumeId(threadKey, resumeId);
+      }
 
       // 记录 agent 事件
       this.historyStore.saveAgentEvents(threadKey, this.agent.name, response.events);
 
       // 后处理回复
       const processedResponse = this.postprocessResponse(response.text);
-
-      // 更新最后活跃时间
-      this.updateThreadActivity(ctx);
 
       this.logger.info(`处理完成，回复长度: ${processedResponse.length}`);
       return processedResponse;
@@ -124,16 +122,15 @@ export class SageCore {
   // /thread_id - 回复当前 THREAD ID
   private cmdThreadId(ctx: MessageContext): string {
     const threadKey = this.resolveThreadKey(ctx);
-    const session = this.threadSessions.get(threadKey);
+    const session = this.historyStore.getSession(threadKey);
 
     if (ctx.threadId) {
       const info = [
         `Thread ID: ${ctx.threadId}`,
         `Agent Provider: ${this.agent.name}`,
-        `Session: ${session?.sessionId || '未创建'}`,
-        `创建者: ${session?.openId || 'N/A'}`,
-        `创建时间: ${session ? new Date(session.createdAt).toLocaleString() : 'N/A'}`,
-        `最后活跃: ${session ? new Date(session.lastActiveAt).toLocaleString() : 'N/A'}`,
+        `Session: ${session?.agent_session_id || '未创建'}`,
+        `创建者: ${session?.open_id || 'N/A'}`,
+        `最后活跃: ${session?.last_active_at || 'N/A'}`,
       ];
       return info.join('\n');
     }
@@ -144,13 +141,14 @@ export class SageCore {
   // /clear - 清空当前 thread 上下文
   private cmdClear(ctx: MessageContext): string {
     const threadKey = this.resolveThreadKey(ctx);
-    const session = this.threadSessions.get(threadKey);
+    const session = this.historyStore.getSession(threadKey);
 
-    if (session) {
-      this.agent.deleteSession(session.sessionId).catch(err => {
+    if (session?.agent_session_id) {
+      this.agent.deleteSession(session.agent_session_id).catch(err => {
         this.logger.error('删除 Agent 会话失败:', err);
       });
-      this.threadSessions.delete(threadKey);
+      this.historyStore.clearSessionAgent(threadKey);
+      this.restoredSessions.delete(session.agent_session_id);
       this.logger.info(`清除 thread 会话: ${threadKey}`);
       return '已清空当前话题的上下文。下一条消息将开启新的对话。';
     }
@@ -182,7 +180,6 @@ export class SageCore {
     return [
       `Agent: ${this.agent.name}`,
       `运行中: ${status.isRunning ? '是' : '否'}`,
-      `活跃话题: ${status.threadCount}`,
       `活跃会话: ${status.sessionCount}`,
     ].join('\n');
   }
@@ -192,38 +189,39 @@ export class SageCore {
     return ctx.threadId || `msg:${ctx.messageId}`;
   }
 
-  // 获取或创建 Thread 对应的 Agent 会话
-  private async getOrCreateThreadSession(ctx: MessageContext): Promise<string> {
-    const threadKey = this.resolveThreadKey(ctx);
+  // 获取或创建 Thread 对应的 Agent 会话（DB 为唯一 source of truth）
+  private async getOrCreateThreadSession(threadKey: string, ctx: MessageContext): Promise<string> {
+    // 查 DB：该 threadKey 是否已有关联的 agent session
+    const row = this.historyStore.getSession(threadKey);
 
-    const existing = this.threadSessions.get(threadKey);
-    if (existing) {
-      this.logger.info(`复用 thread 会话: ${threadKey} -> ${existing.sessionId}`);
-      return existing.sessionId;
+    if (row?.agent_session_id) {
+      // 懒恢复：首次使用时在 provider 侧注册
+      if (!this.restoredSessions.has(row.agent_session_id)) {
+        try {
+          await this.agent.restoreSession(row.agent_session_id, row.resume_id || undefined);
+          this.restoredSessions.add(row.agent_session_id);
+          this.logger.info(`懒恢复会话: ${threadKey} -> ${row.agent_session_id}`);
+        } catch (err) {
+          this.logger.warn(`恢复会话失败，将创建新会话: ${row.agent_session_id}`, err);
+          // 恢复失败，走下面的创建逻辑
+          return this.createNewSession(threadKey, ctx);
+        }
+      } else {
+        this.logger.info(`复用 thread 会话: ${threadKey} -> ${row.agent_session_id}`);
+      }
+      return row.agent_session_id;
     }
 
-    // 创建新会话
-    const session = await this.agent.createSession();
-    const now = Date.now();
-
-    this.threadSessions.set(threadKey, {
-      sessionId: session.id,
-      openId: ctx.openId,
-      createdAt: now,
-      lastActiveAt: now,
-    });
-
-    this.logger.info(`创建新 thread 会话: ${threadKey} -> ${session.id} (provider: ${this.agent.name})`);
-    return session.id;
+    // 没有已有 session，创建新的
+    return this.createNewSession(threadKey, ctx);
   }
 
-  // 更新 Thread 最后活跃时间
-  private updateThreadActivity(ctx: MessageContext): void {
-    const threadKey = this.resolveThreadKey(ctx);
-    const session = this.threadSessions.get(threadKey);
-    if (session) {
-      session.lastActiveAt = Date.now();
-    }
+  // 创建新 agent session 并关联到 threadKey
+  private async createNewSession(threadKey: string, ctx: MessageContext): Promise<string> {
+    const session = await this.agent.createSession();
+    this.restoredSessions.add(session.id);
+    this.logger.info(`创建新 thread 会话: ${threadKey} -> ${session.id} (provider: ${this.agent.name})`);
+    return session.id;
   }
 
   // 消息预处理
@@ -290,10 +288,8 @@ export class SageCore {
 
     setInterval(async () => {
       try {
-        const cleaned = await this.cleanupExpiredThreadSessions();
-        if (cleaned > 0) {
-          this.logger.info(`清理了 ${cleaned} 个过期 thread 会话`);
-        }
+        await this.agent.cleanupSessions(24 * 60 * 60 * 1000);
+        this.restoredSessions.clear(); // 清理后重置，下次使用会重新 restore
       } catch (error) {
         this.logger.error('清理过期会话失败:', error);
       }
@@ -302,42 +298,24 @@ export class SageCore {
     this.logger.info('已设置会话清理任务');
   }
 
-  // 清理过期的 Thread 会话
-  private async cleanupExpiredThreadSessions(maxAge: number = 24 * 60 * 60 * 1000): Promise<number> {
-    const now = Date.now();
-    let cleaned = 0;
-
-    for (const [threadKey, session] of this.threadSessions.entries()) {
-      if (now - session.lastActiveAt > maxAge) {
-        this.agent.deleteSession(session.sessionId).catch(() => {});
-        this.threadSessions.delete(threadKey);
-        cleaned++;
-      }
-    }
-
-    // 同时让 provider 清理自己的过期会话
-    await this.agent.cleanupSessions(maxAge);
-
-    return cleaned;
-  }
-
   // 获取服务状态
   getStatus(): {
     isRunning: boolean;
     agentProvider: string;
-    threadCount: number;
     sessionCount: number;
   } {
     return {
       isRunning: this.isRunning,
       agentProvider: this.agent.name,
-      threadCount: this.threadSessions.size,
       sessionCount: this.agent.getActiveSessions().length,
     };
   }
 
   // 手动清理会话
   async cleanupSessions(): Promise<number> {
-    return this.cleanupExpiredThreadSessions();
+    const maxAge = 24 * 60 * 60 * 1000;
+    const cleaned = await this.agent.cleanupSessions(maxAge);
+    this.restoredSessions.clear();
+    return cleaned;
   }
 }

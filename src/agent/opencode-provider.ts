@@ -80,6 +80,24 @@ export class OpenCodeProvider implements AgentProvider {
     };
   }
 
+  getResumeId(_sessionId: string): string | undefined {
+    return undefined; // OpenCode 无状态
+  }
+
+  async restoreSession(sessionId: string, _resumeId?: string): Promise<AgentSession> {
+    // OpenCode 无状态，直接创建 session 对象即可
+    const now = Date.now();
+    const session: AgentSession = {
+      id: sessionId,
+      provider: this.name,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.sessions.set(sessionId, session);
+    this.logger.info(`会话恢复: ${sessionId}`);
+    return session;
+  }
+
   async deleteSession(sessionId: string): Promise<void> {
     this.sessions.delete(sessionId);
     this.logger.info(`会话已删除: ${sessionId}`);

@@ -3,7 +3,7 @@ import { WebServer } from './services/web';
 import { HistoryStore } from './services/history-store';
 import { Scheduler } from './services/scheduler';
 import { registerTasks } from './services/tasks';
-import { validateConfig, getAgentConfig } from './config';
+import { validateConfig, getAgentConfig, getFallbackAgentConfig } from './config';
 import { createAgentProvider } from './agent';
 import { Logger } from './utils';
 
@@ -26,9 +26,10 @@ class Application {
         process.exit(1);
       }
 
-      // 创建 Agent Provider
+      // 创建 Agent Provider（支持 fallback）
       const agentConfig = getAgentConfig();
-      const agent = createAgentProvider(agentConfig);
+      const fallbackConfig = getFallbackAgentConfig();
+      const agent = createAgentProvider(agentConfig, fallbackConfig);
       logger.info(`使用 Agent Provider: ${agent.name}`);
 
       // 创建 HistoryStore（默认路径 data/history.db）

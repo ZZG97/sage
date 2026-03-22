@@ -50,6 +50,42 @@ export function getAgentConfig(): AgentProviderConfig {
   }
 }
 
+/**
+ * 获取 fallback provider 配置（如果设置了 AGENT_FALLBACK_PROVIDER）
+ */
+export function getFallbackAgentConfig(): AgentProviderConfig | null {
+  const provider = process.env.AGENT_FALLBACK_PROVIDER;
+  if (!provider) return null;
+
+  switch (provider) {
+    case 'claude-code':
+      return {
+        type: 'claude-code',
+        workDir: process.env.CLAUDE_CODE_WORK_DIR,
+        maxTurns: parseInt(process.env.CLAUDE_CODE_MAX_TURNS || '30', 10),
+        allowedTools: process.env.CLAUDE_CODE_ALLOWED_TOOLS?.split(',').filter(Boolean),
+        model: process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-4-6',
+      };
+
+    case 'codex':
+      return {
+        type: 'codex',
+        workDir: process.env.CODEX_WORK_DIR,
+        model: process.env.CODEX_MODEL || 'gpt-5.3-codex',
+        sandboxMode: (process.env.CODEX_SANDBOX_MODE as any) || 'danger-full-access',
+      };
+
+    case 'opencode':
+      return {
+        type: 'opencode',
+        baseUrl: process.env.OPENCODE_BASE_URL || 'http://127.0.0.1:4111',
+      };
+
+    default:
+      return null;
+  }
+}
+
 // 配置验证
 export function validateConfig(): boolean {
   const requiredEnvVars = [

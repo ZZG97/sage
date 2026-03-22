@@ -170,6 +170,27 @@ export class CodexProvider implements AgentProvider {
     }
   }
 
+  getResumeId(sessionId: string): string | undefined {
+    return this.threadIds.get(sessionId);
+  }
+
+  async restoreSession(sessionId: string, resumeId?: string): Promise<AgentSession> {
+    const now = Date.now();
+    const session: AgentSession = {
+      id: sessionId,
+      provider: this.name,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.sessions.set(sessionId, session);
+    if (resumeId) {
+      // 只存 threadId，Thread 对象在下次 sendMessage 时通过 resumeThread 懒创建
+      this.threadIds.set(sessionId, resumeId);
+    }
+    this.logger.info(`会话恢复: ${sessionId}, threadId: ${resumeId || '无'}`);
+    return session;
+  }
+
   async deleteSession(sessionId: string): Promise<void> {
     this.sessions.delete(sessionId);
     this.threads.delete(sessionId);

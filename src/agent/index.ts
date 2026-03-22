@@ -4,16 +4,18 @@ import { AgentProvider, AgentProviderConfig } from './types';
 import { OpenCodeProvider } from './opencode-provider';
 import { ClaudeCodeProvider } from './claude-code-provider';
 import { CodexProvider } from './codex-provider';
+import { FallbackAgentProvider } from './fallback-provider';
 
 export type { AgentProvider, AgentSession, AgentResponse, AgentProviderConfig } from './types';
 export { OpenCodeProvider } from './opencode-provider';
 export { ClaudeCodeProvider } from './claude-code-provider';
 export { CodexProvider } from './codex-provider';
+export { FallbackAgentProvider } from './fallback-provider';
 
 /**
- * 根据配置创建 AgentProvider 实例
+ * 创建单个 AgentProvider 实例
  */
-export function createAgentProvider(config: AgentProviderConfig): AgentProvider {
+function createSingleProvider(config: AgentProviderConfig): AgentProvider {
   switch (config.type) {
     case 'opencode':
       return new OpenCodeProvider(config);
@@ -24,4 +26,16 @@ export function createAgentProvider(config: AgentProviderConfig): AgentProvider 
     default:
       throw new Error(`未知的 agent provider 类型: ${(config as any).type}`);
   }
+}
+
+/**
+ * 根据配置创建 AgentProvider 实例，支持 fallback
+ */
+export function createAgentProvider(config: AgentProviderConfig, fallbackConfig?: AgentProviderConfig | null): AgentProvider {
+  const primary = createSingleProvider(config);
+  if (fallbackConfig) {
+    const fallback = createSingleProvider(fallbackConfig);
+    return new FallbackAgentProvider(primary, fallback);
+  }
+  return primary;
 }

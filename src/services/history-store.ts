@@ -89,16 +89,35 @@ export class HistoryStore {
       CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
       CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
     `);
+
+    // Migration: 新增 thread_key 和 resume_id 列
+    this.migrateAddColumns();
   }
 
-  /** 确保 session 存在，不存在则创建 */
-  ensureSession(sessionId: string, provider: string, ctx?: { openId?: string; chatId?: string; chatType?: string }): void {
+  /** 增量 migration：为 sessions 表添加 agent_session_id / resume_id 列 */
+  private migrateAddColumns(): void {
+    const cols = this.db.query(`PRAGMA table_info(sessions)`).all() as { name: string }[];
+    const colNames = new Set(cols.map(c => c.name));
+
+    if (!colNames.has('agent_session_id')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN agent_session_id TEXT`);
+      this.logger.info('Migration: 添加 agent_session_id 列');
+    }
+    if (!colNames.has('resume_id')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN resume_id TEXT`);
+      this.logger.info('Migration: 添加 resume_id 列');
+    }
+  }
+
+  /** 确保 session 存在，不存在则创建。sessionId 此处即 threadKey（DB 主键） */
+  ensureSession(sessionId: string, provider: string, ctx?: { openId?: string; chatId?: string; chatType?: string; agentSessionId?: string }): void {
     const now = new Date().toISOString();
     this.db.run(
-      `INSERT INTO sessions (id, env, provider, open_id, chat_id, chat_type, started_at, last_active_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET last_active_at = ?`,
-      [sessionId, this.env, provider, ctx?.openId ?? null, ctx?.chatId ?? null, ctx?.chatType ?? null, now, now, now]
+      `INSERT INTO sessions (id, env, provider, open_id, chat_id, chat_type, agent_session_id, started_at, last_active_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET last_active_at = ?,
+         agent_session_id = COALESCE(excluded.agent_session_id, sessions.agent_session_id)`,
+      [sessionId, this.env, provider, ctx?.openId ?? null, ctx?.chatId ?? null, ctx?.chatType ?? null, ctx?.agentSessionId ?? null, now, now, now]
     );
   }
 
@@ -119,7 +138,7 @@ export class HistoryStore {
   }
 
   /** 写入用户消息 */
-  saveUserMessage(sessionId: string, provider: string, text: string, ctx?: { openId?: string; chatId?: string; chatType?: string }): void {
+  saveUserMessage(sessionId: string, provider: string, text: string, ctx?: { openId?: string; chatId?: string; chatType?: string; agentSessionId?: string }): void {
     this.ensureSession(sessionId, provider, ctx);
     const pos = this.nextPosition(sessionId);
     this.db.run(
@@ -147,6 +166,63 @@ export class HistoryStore {
     }
 
     this.touchSession(sessionId);
+  }
+
+  /** 更新 session 的 resume_id（SDK 级别的 resume ID） */
+  updateResumeId(threadKey: string, resumeId: string): void {
+    this.db.run(
+      `UPDATE sessions SET resume_id = ? WHERE id = ?`,
+      [resumeId, threadKey]
+    );
+  }
+
+  /** 更新 session 的 agent_session_id */
+  updateAgentSessionId(threadKey: string, agentSessionId: string): void {
+    this.db.run(
+      `UPDATE sessions SET agent_session_id = ? WHERE id = ?`,
+      [agentSessionId, threadKey]
+    );
+  }
+
+  /** 获取活跃 sessions（用于启动恢复）。id 即 threadKey */
+  getActiveSessionsForRestore(maxAgeMs: number): Array<{
+    id: string;             // threadKey
+    agent_session_id: string; // provider session id (cc-xxx)
+    resume_id: string;      // SDK resume id
+    provider: string;
+    open_id: string;
+    last_active_at: string;
+  }> {
+    const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+    return this.db.query(
+      `SELECT id, agent_session_id, resume_id, provider, open_id, last_active_at
+       FROM sessions
+       WHERE env = ? AND agent_session_id IS NOT NULL AND last_active_at > ?
+       ORDER BY last_active_at DESC`
+    ).all(this.env, cutoff) as any[];
+  }
+
+  /** 按 threadKey 查询 session（返回 null 表示不存在） */
+  getSession(threadKey: string): {
+    id: string;
+    agent_session_id: string | null;
+    resume_id: string | null;
+    provider: string;
+    open_id: string | null;
+    last_active_at: string;
+  } | null {
+    return this.db.query(
+      `SELECT id, agent_session_id, resume_id, provider, open_id, last_active_at
+       FROM sessions WHERE id = ? AND env = ?`
+    ).get(threadKey, this.env) as any ?? null;
+  }
+
+  /** 清除 session 的 agent 关联（/clear 用） */
+  clearSessionAgent(threadKey: string): void {
+    this.db.run(
+      `UPDATE sessions SET agent_session_id = NULL, resume_id = NULL WHERE id = ?`,
+      [threadKey]
+    );
   }
 
   /** 迁移 session_id（飞书 thread 创建时，msg:xxx → thread_id） */

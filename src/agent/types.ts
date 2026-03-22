@@ -52,6 +52,12 @@ export interface AgentProvider {
   /** 清理过期会话 */
   cleanupSessions(maxAgeMs: number): Promise<number>;
 
+  /** 恢复会话（重启后从持久化数据重建） */
+  restoreSession(sessionId: string, resumeId?: string): Promise<AgentSession>;
+
+  /** 获取会话的 SDK resume ID（用于持久化） */
+  getResumeId(sessionId: string): string | undefined;
+
   /** 销毁 provider（释放资源） */
   destroy(): Promise<void>;
 }

@@ -213,6 +213,26 @@ export class ClaudeCodeProvider implements AgentProvider {
     }
   }
 
+  getResumeId(sessionId: string): string | undefined {
+    return this.sdkSessionIds.get(sessionId);
+  }
+
+  async restoreSession(sessionId: string, resumeId?: string): Promise<AgentSession> {
+    const now = Date.now();
+    const session: AgentSession = {
+      id: sessionId,
+      provider: this.name,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.sessions.set(sessionId, session);
+    if (resumeId) {
+      this.sdkSessionIds.set(sessionId, resumeId);
+    }
+    this.logger.info(`会话恢复: ${sessionId}, resumeId: ${resumeId || '无'}`);
+    return session;
+  }
+
   async deleteSession(sessionId: string): Promise<void> {
     this.sessions.delete(sessionId);
     this.sdkSessionIds.delete(sessionId);
