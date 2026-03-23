@@ -19,7 +19,7 @@ module.exports = {
     {
       name: 'sage-dev',
       script: 'caffeinate',
-      args: '-i bun --env-file .env.dev src/index.ts',
+      args: '-i bun --no-env-file --env-file .env.dev src/index.ts',
       cwd: __dirname,
       env: {
         CLAUDE_CODE_WORK_DIR: __dirname + '/agent_home',
