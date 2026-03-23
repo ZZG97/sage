@@ -68,12 +68,12 @@ export class FallbackAgentProvider implements AgentProvider {
 
       const newSession = await this.fallback.createSession();
 
-      // yield 降级提示事件
+      // yield 降级提示事件（notice 类型，卡片中独立渲染，不会被 resultText 覆盖）
       yield {
-        type: 'text',
+        type: 'notice',
         content: `⚠️ ${this.primary.name} 异常，已自动切换到 ${this.fallback.name}`,
         ts: new Date().toISOString(),
-        persist: true,
+        persist: false,
       };
 
       // 代理 fallback 的流式输出，拦截 result 事件注入 metadata

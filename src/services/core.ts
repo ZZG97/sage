@@ -94,8 +94,8 @@ export class SageCore {
             continue;
           }
 
-          // 节流 PATCH：对可见事件（tool_call/thinking/text）触发更新
-          if (event.type === 'tool_call' || event.type === 'thinking' || event.type === 'text') {
+          // 节流 PATCH：对可见事件（tool_call/thinking/text/notice）触发更新
+          if (event.type === 'tool_call' || event.type === 'thinking' || event.type === 'text' || event.type === 'notice') {
             const now = Date.now();
             if (now - lastPatchTime >= PATCH_INTERVAL) {
               const card = this.feishuService.buildStreamingCard(allEvents, true);

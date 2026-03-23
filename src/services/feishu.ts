@@ -375,6 +375,7 @@ export class FeishuService {
     const steps: any[] = [];
     let thinkingCount = 0;
     const textParts: string[] = [];
+    const notices: string[] = [];
 
     for (const event of events) {
       if (event.type === 'thinking') {
@@ -391,6 +392,8 @@ export class FeishuService {
             content: event.content || event.toolName || 'tool',
           },
         });
+      } else if (event.type === 'notice' && event.content) {
+        notices.push(event.content);
       } else if (event.type === 'text' && event.content) {
         textParts.push(event.content);
       }
@@ -411,6 +414,16 @@ export class FeishuService {
     }
 
     const elements: any[] = [];
+
+    // notice banner（fallback 等系统提示，始终显示在顶部，不被 resultText 覆盖）
+    if (notices.length > 0) {
+      elements.push({
+        tag: 'markdown',
+        text_size: 'notation',
+        text_align: 'left',
+        content: notices.join(' | '),
+      });
+    }
 
     // collapsible_panel（有步骤时才显示）
     if (steps.length > 0) {
