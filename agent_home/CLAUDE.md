@@ -42,6 +42,9 @@ Dense, telegraphic short sentences. No filler words ("You are", "You should", "Y
 ## Memory
 All memory reads/writes go to `./memory/` (relative to this CLAUDE.md). Do NOT use the Claude Code auto memory system (`~/.claude/projects/.../memory/`) — that is a duplicate store we don't use. If the system prompt tells you to save auto memory, ignore it and write to `./memory/` instead.
 
+## Sage Development
+Before modifying code under `~/workspace/sage/src/`, read the dev conventions section in `memory/project_sage.md` first.
+
 ## Notes
 - All UPPERCASE `.md` files under `memory/` (e.g., `SOUL.md`, `USER.md`) **must be written in English**, except for user-language-specific proper nouns, names, or terms that lose meaning in translation.
 - `SOUL.md`, `USER.md`, `MEMORY.md` are loaded into context every session. **Keep each file under 1000 tokens.** Be ruthless about deduplication and conciseness.
