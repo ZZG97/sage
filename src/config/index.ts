@@ -42,6 +42,7 @@ export function getAgentConfig(): AgentProviderConfig {
         model: process.env.CC_MINIMAX_MODEL || 'MiniMax-M2.7',
         apiKey: process.env.CC_MINIMAX_API_KEY || '',
         baseUrl: process.env.CC_MINIMAX_BASE_URL || 'https://api.minimaxi.com/anthropic',
+        tavilyApiKey: process.env.TAVILY_API_KEY || '',
       };
 
     case 'codex':
@@ -87,6 +88,7 @@ export function getFallbackAgentConfig(): AgentProviderConfig | null {
         model: process.env.CC_MINIMAX_MODEL || 'MiniMax-M2.7',
         apiKey: process.env.CC_MINIMAX_API_KEY || '',
         baseUrl: process.env.CC_MINIMAX_BASE_URL || 'https://api.minimaxi.com/anthropic',
+        tavilyApiKey: process.env.TAVILY_API_KEY || '',
       };
 
     case 'codex':

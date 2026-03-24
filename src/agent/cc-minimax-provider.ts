@@ -22,6 +22,7 @@ export class CcMinimaxProvider implements AgentProvider {
   private apiKey: string;
   private baseUrl: string;
   private systemPromptAppend: string;
+  private tavilyApiKey: string;
 
   constructor(config: CcMinimaxProviderConfig) {
     this.logger = new Logger('CcMinimaxProvider');
@@ -33,9 +34,13 @@ export class CcMinimaxProvider implements AgentProvider {
     this.model = config.model || 'MiniMax-M2.7';
     this.apiKey = config.apiKey || '';
     this.baseUrl = config.baseUrl || 'https://api.minimaxi.com/anthropic';
+    this.tavilyApiKey = config.tavilyApiKey || '';
 
     if (!this.apiKey) {
       this.logger.warn('CC_MINIMAX_API_KEY 未设置，调用时会失败');
+    }
+    if (!this.tavilyApiKey) {
+      this.logger.warn('TAVILY_API_KEY 未设置，搜索工具不可用');
     }
 
     this.systemPromptAppend = this.buildSystemPromptAppend();
@@ -150,6 +155,17 @@ export class CcMinimaxProvider implements AgentProvider {
       options.allowedTools = this.allowedTools.filter(t => !CcMinimaxProvider.DISABLED_TOOLS.includes(t));
     }
     options.disallowedTools = CcMinimaxProvider.DISABLED_TOOLS;
+
+    // Tavily 搜索 MCP server — 仅在配置了 API key 时启用
+    if (this.tavilyApiKey) {
+      options.mcpServers = {
+        'tavily': {
+          command: 'npx',
+          args: ['-y', 'tavily-mcp@latest'],
+          env: { TAVILY_API_KEY: this.tavilyApiKey },
+        },
+      };
+    }
 
     const sdkSessionId = this.sdkSessionIds.get(sessionId);
     if (sdkSessionId) {
@@ -298,6 +314,10 @@ export class CcMinimaxProvider implements AgentProvider {
         return `WebSearch "${input.query ?? ''}"`;
       case 'WebFetch':
         return `WebFetch ${input.url ?? ''}`;
+      case 'tavily-search':
+        return `Search "${input.query ?? ''}"`;
+      case 'tavily-extract':
+        return `Extract ${input.url ?? input.urls?.[0] ?? ''}`;
       case 'Agent':
         return `Agent: ${input.description ?? ''}`;
       default:

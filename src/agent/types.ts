@@ -100,6 +100,7 @@ export interface CcMinimaxProviderConfig {
   model?: string;         // MiniMax 模型名，如 'MiniMax-M2.7'
   apiKey?: string;        // MiniMax API Key
   baseUrl?: string;       // MiniMax 兼容 Anthropic 的 API 端点
+  tavilyApiKey?: string;  // Tavily Search API Key（MCP 搜索工具）
 }
 
 export type AgentProviderConfig = OpenCodeProviderConfig | ClaudeCodeProviderConfig | CodexProviderConfig | CcMinimaxProviderConfig;
