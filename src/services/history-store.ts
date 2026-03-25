@@ -278,6 +278,29 @@ export class HistoryStore {
     }));
   }
 
+  /** 获取某 session 最近 N 轮 user/assistant 文本对话（用于 fallback 上下文注入） */
+  getRecentConversation(sessionId: string, maxTurns: number = 5): Array<{ role: string; content: string }> {
+    const rows = this.db.query(
+      `SELECT role, content FROM events
+       WHERE session_id = ? AND type = 'text' AND content IS NOT NULL AND content != ''
+       ORDER BY position DESC
+       LIMIT ?`
+    ).all(sessionId, maxTurns * 2) as Array<{ role: string; content: string }>;
+
+    // 反转回正序，并截取最近 maxTurns 轮（每轮 = 1 user + 1 assistant）
+    rows.reverse();
+
+    // 取最后 maxTurns * 2 条（已经是了），但按轮次截断：从第一条 user 消息开始
+    const firstUserIdx = rows.findIndex(r => r.role === 'user');
+    if (firstUserIdx > 0) rows.splice(0, firstUserIdx);
+
+    // 截断 content 避免 token 过长
+    return rows.map(r => ({
+      role: r.role,
+      content: r.content.length > 500 ? r.content.slice(0, 500) + '...' : r.content,
+    }));
+  }
+
   /** 搜索历史（全文搜 content） */
   searchHistory(keyword: string, limit: number = 50): any[] {
     return this.db.query(

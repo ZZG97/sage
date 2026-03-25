@@ -3,6 +3,9 @@
 import { AgentProvider, AgentSession, AgentResponse, AgentEvent } from './types';
 import { Logger } from '../utils';
 
+/** 查询 threadKey 对应的最近对话历史（由外部注入，避免直接依赖 HistoryStore） */
+export type RecentHistoryFn = (threadKey: string, maxTurns: number) => Array<{ role: string; content: string }>;
+
 export class FallbackAgentProvider implements AgentProvider {
   readonly name: string;
 
@@ -10,11 +13,25 @@ export class FallbackAgentProvider implements AgentProvider {
   private fallback: AgentProvider;
   private logger: Logger;
 
+  /** agent_session_id → threadKey 映射，由 SageCore 注册 */
+  private sessionToThread: Map<string, string> = new Map();
+  private getRecentHistory?: RecentHistoryFn;
+
   constructor(primary: AgentProvider, fallback: AgentProvider) {
     this.primary = primary;
     this.fallback = fallback;
     this.name = `${primary.name}+${fallback.name}`;
     this.logger = new Logger('FallbackProvider');
+  }
+
+  /** 注入历史查询函数（由 SageCore 在初始化后调用） */
+  setRecentHistoryFn(fn: RecentHistoryFn): void {
+    this.getRecentHistory = fn;
+  }
+
+  /** 注册 sessionId → threadKey 映射（SageCore 每次发消息前调用） */
+  registerSessionThread(sessionId: string, threadKey: string): void {
+    this.sessionToThread.set(sessionId, threadKey);
   }
 
   async initialize(): Promise<void> {
@@ -68,6 +85,9 @@ export class FallbackAgentProvider implements AgentProvider {
 
       const newSession = await this.fallback.createSession();
 
+      // 构建带上下文的消息
+      const enrichedMessage = this.buildFallbackMessage(sessionId, message);
+
       // yield 降级提示事件（notice 类型，卡片中独立渲染，不会被 resultText 覆盖）
       yield {
         type: 'notice',
@@ -77,7 +97,7 @@ export class FallbackAgentProvider implements AgentProvider {
       };
 
       // 代理 fallback 的流式输出，拦截 result 事件注入 metadata
-      for await (const event of this.fallback.sendMessageStream(newSession.id, message)) {
+      for await (const event of this.fallback.sendMessageStream(newSession.id, enrichedMessage)) {
         if (event.type === 'result') {
           // 注入 newSessionId metadata（通过特殊字段，SageCore 检查）
           (event as any).metadata = { newSessionId: newSession.id };
@@ -115,6 +135,26 @@ export class FallbackAgentProvider implements AgentProvider {
   async destroy(): Promise<void> {
     await this.primary.destroy();
     await this.fallback.destroy();
+  }
+
+  /** 降级时构建带历史上下文的消息 */
+  private buildFallbackMessage(originalSessionId: string, message: string): string {
+    if (!this.getRecentHistory) return message;
+
+    const threadKey = this.sessionToThread.get(originalSessionId);
+    if (!threadKey) {
+      this.logger.warn(`无法找到 sessionId ${originalSessionId} 对应的 threadKey，跳过上下文注入`);
+      return message;
+    }
+
+    const history = this.getRecentHistory(threadKey, 5);
+    if (history.length === 0) return message;
+
+    const historyText = history
+      .map(h => `${h.role === 'user' ? '用户' : '助手'}: ${h.content}`)
+      .join('\n');
+
+    return `[上下文恢复] 由于服务切换，以下是之前的对话记录供参考：\n${historyText}\n---\n${message}`;
   }
 
   /** 根据 sessionId 前缀路由到对应 provider */

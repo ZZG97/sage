@@ -1,5 +1,6 @@
 import { FeishuService } from './feishu';
 import { AgentProvider } from '../agent';
+import { FallbackAgentProvider } from '../agent/fallback-provider';
 import type { AgentEvent } from '../agent/types';
 import type { HistoryStore } from './history-store';
 import { Logger, AppError } from '../utils';
@@ -24,6 +25,13 @@ export class SageCore {
 
     // 设置飞书消息处理器（不再返回 string，SageCore 自行控制卡片）
     this.feishuService.setMessageHandler(this.handleFeishuMessage.bind(this));
+
+    // 为 FallbackAgentProvider 注入历史查询能力
+    if (agent instanceof FallbackAgentProvider) {
+      agent.setRecentHistoryFn((threadKey, maxTurns) =>
+        this.historyStore.getRecentConversation(threadKey, maxTurns)
+      );
+    }
 
     // 回复后飞书创建 thread 时，迁移 session 映射
     this.feishuService.setThreadCreatedHandler((messageId, threadId) => {
@@ -55,6 +63,11 @@ export class SageCore {
       // 获取或创建 Thread 对应的会话
       const threadKey = this.resolveThreadKey(ctx);
       const sessionId = await this.getOrCreateThreadSession(threadKey, ctx);
+
+      // 注册 session → thread 映射（供 FallbackAgentProvider 反查 threadKey）
+      if (this.agent instanceof FallbackAgentProvider) {
+        this.agent.registerSessionThread(sessionId, threadKey);
+      }
 
       // 记录用户消息
       this.historyStore.saveUserMessage(threadKey, this.agent.name, processedMessage, {
