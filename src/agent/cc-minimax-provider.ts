@@ -2,7 +2,7 @@
 // 通过临时注入环境变量实现，不影响其他 provider
 
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk';
-import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKResultError, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import { AgentProvider, AgentSession, AgentResponse, AgentEvent, AgentResultEvent, CcMinimaxProviderConfig } from './types';
 import { Logger } from '../utils';
 
@@ -221,10 +221,10 @@ export class CcMinimaxProvider implements AgentProvider {
           if (resultMsg.subtype === 'success' && 'result' in resultMsg) {
             resultText = resultMsg.result;
           } else if ('errors' in resultMsg) {
-            const errorMsg = (resultMsg as any).errors?.join('; ') || '未知错误';
-            this.logger.error(`CC-MiniMax 执行错误: ${errorMsg}`);
-            yield { type: 'error', content: errorMsg, ts: new Date().toISOString(), persist: true };
-            throw new Error(`CC-MiniMax 执行错误: ${errorMsg}`);
+            const detail = this.formatSdkResultError(resultMsg as SDKResultError);
+            this.logger.error(`CC-MiniMax 执行错误: ${detail.logMessage}`);
+            yield { type: 'error', content: detail.userMessage, ts: new Date().toISOString(), persist: true };
+            throw new Error(`CC-MiniMax 执行错误: ${detail.userMessage}`);
           }
         }
       }
@@ -238,7 +238,9 @@ export class CcMinimaxProvider implements AgentProvider {
       yield { type: 'result', content: resultText || '（无回复内容）', ts: new Date().toISOString(), persist: false };
 
     } catch (error: any) {
-      this.logger.error(`CC-MiniMax 调用失败: ${error.message}`);
+      this.logger.error(
+        `CC-MiniMax 调用失败: session=${sessionId}, resume=${sdkSessionId || '无'}, messageLen=${message.length}, error=${error?.message || '未知错误'}`
+      );
       throw error;
     }
   }
@@ -323,6 +325,17 @@ export class CcMinimaxProvider implements AgentProvider {
       default:
         return `${name}: ${JSON.stringify(input).slice(0, 100)}`;
     }
+  }
+
+  private formatSdkResultError(resultMsg: SDKResultError): { userMessage: string; logMessage: string } {
+    const errors = (resultMsg.errors || [])
+      .map(e => (typeof e === 'string' ? e.trim() : ''))
+      .filter(Boolean);
+    const errorText = errors.length > 0 ? errors.join('; ') : '';
+    const meta = `subtype=${resultMsg.subtype}, turns=${resultMsg.num_turns}, stop_reason=${resultMsg.stop_reason ?? 'null'}, session=${resultMsg.session_id}`;
+    const userMessage = errorText || `SDK结果错误(${resultMsg.subtype})，turns=${resultMsg.num_turns}, stop_reason=${resultMsg.stop_reason ?? 'null'}`;
+    const logMessage = `${meta}, errors=${errorText || '[]'}`;
+    return { userMessage, logMessage };
   }
 
   private extractToolDetail(name: string, input: any): string | undefined {

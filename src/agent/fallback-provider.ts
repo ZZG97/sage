@@ -77,13 +77,20 @@ export class FallbackAgentProvider implements AgentProvider {
     try {
       yield* provider.sendMessageStream(sessionId, message);
     } catch (err: any) {
+      const errSummary = this.describeError(err);
       if (provider === this.fallback || !this.isFallbackEligible(err)) {
+        this.logger.warn(
+          `不触发降级: provider=${provider.name}, session=${sessionId}, messageLen=${message.length}, reason=${errSummary}`
+        );
         throw err;
       }
 
-      this.logger.warn(`Primary (${this.primary.name}) sendMessageStream 失败，降级到 ${this.fallback.name}: ${err.message}`);
+      this.logger.warn(
+        `Primary (${this.primary.name}) sendMessageStream 失败，降级到 ${this.fallback.name}: session=${sessionId}, messageLen=${message.length}, reason=${errSummary}`
+      );
 
       const newSession = await this.fallback.createSession();
+      this.logger.warn(`创建 fallback 会话: oldSession=${sessionId}, newSession=${newSession.id}`);
 
       // 构建带上下文的消息
       const enrichedMessage = this.buildFallbackMessage(sessionId, message);
@@ -139,7 +146,10 @@ export class FallbackAgentProvider implements AgentProvider {
 
   /** 降级时构建带历史上下文的消息 */
   private buildFallbackMessage(originalSessionId: string, message: string): string {
-    if (!this.getRecentHistory) return message;
+    if (!this.getRecentHistory) {
+      this.logger.warn(`未注入 RecentHistoryFn，跳过上下文恢复: session=${originalSessionId}`);
+      return message;
+    }
 
     const threadKey = this.sessionToThread.get(originalSessionId);
     if (!threadKey) {
@@ -148,11 +158,18 @@ export class FallbackAgentProvider implements AgentProvider {
     }
 
     const history = this.getRecentHistory(threadKey, 5);
-    if (history.length === 0) return message;
+    if (history.length === 0) {
+      this.logger.info(`未命中历史上下文: thread=${threadKey}, session=${originalSessionId}`);
+      return message;
+    }
 
     const historyText = history
       .map(h => `${h.role === 'user' ? '用户' : '助手'}: ${h.content}`)
       .join('\n');
+
+    this.logger.info(
+      `注入降级上下文: thread=${threadKey}, session=${originalSessionId}, turns=${history.length}, historyChars=${historyText.length}, messageChars=${message.length}`
+    );
 
     return `[上下文恢复] 由于服务切换，以下是之前的对话记录供参考：\n${historyText}\n---\n${message}`;
   }
@@ -186,5 +203,18 @@ export class FallbackAgentProvider implements AgentProvider {
       case 'opencode': return 'oc-';
       default: return '';
     }
+  }
+
+  private describeError(error: any): string {
+    if (!error) return 'unknown';
+    const name = typeof error?.name === 'string' ? error.name : 'Error';
+    const code = typeof error?.code === 'string' ? error.code : '';
+    const message = typeof error?.message === 'string' ? error.message : String(error);
+    const stackLine = typeof error?.stack === 'string' ? error.stack.split('\n')[1]?.trim() : '';
+    const parts = [`name=${name}`];
+    if (code) parts.push(`code=${code}`);
+    parts.push(`message=${message}`);
+    if (stackLine) parts.push(`at=${stackLine}`);
+    return parts.join(', ');
   }
 }

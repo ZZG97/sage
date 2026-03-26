@@ -2,7 +2,7 @@
 // 让 Sage 中的 AI 就是"小克"：共享 agent_home 的 SOUL.md、USER.md、memory、skills
 
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk';
-import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKMessage, SDKResultError, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
 import { AgentProvider, AgentSession, AgentResponse, AgentEvent, ClaudeCodeProviderConfig } from './types';
 import { Logger } from '../utils';
 
@@ -178,10 +178,10 @@ export class ClaudeCodeProvider implements AgentProvider {
           if (resultMsg.subtype === 'success' && 'result' in resultMsg) {
             resultText = resultMsg.result;
           } else if ('errors' in resultMsg) {
-            const errorMsg = (resultMsg as any).errors?.join('; ') || '未知错误';
-            this.logger.error(`Claude SDK 执行错误: ${errorMsg}`);
-            yield { type: 'error', content: errorMsg, ts: new Date().toISOString(), persist: true };
-            throw new Error(`Claude 执行错误: ${errorMsg}`);
+            const detail = this.formatSdkResultError(resultMsg as SDKResultError);
+            this.logger.error(`Claude SDK 执行错误: ${detail.logMessage}`);
+            yield { type: 'error', content: detail.userMessage, ts: new Date().toISOString(), persist: true };
+            throw new Error(`Claude 执行错误: ${detail.userMessage}`);
           }
         }
       }
@@ -197,7 +197,9 @@ export class ClaudeCodeProvider implements AgentProvider {
       yield { type: 'result', content: resultText || '（无回复内容）', ts: new Date().toISOString(), persist: false };
 
     } catch (error: any) {
-      this.logger.error(`Claude SDK 调用失败: ${error.message}`);
+      this.logger.error(
+        `Claude SDK 调用失败: session=${sessionId}, resume=${sdkSessionId || '无'}, messageLen=${message.length}, error=${error?.message || '未知错误'}`
+      );
       throw error;
     }
   }
@@ -279,6 +281,17 @@ export class ClaudeCodeProvider implements AgentProvider {
       default:
         return `${name}: ${JSON.stringify(input).slice(0, 100)}`;
     }
+  }
+
+  private formatSdkResultError(resultMsg: SDKResultError): { userMessage: string; logMessage: string } {
+    const errors = (resultMsg.errors || [])
+      .map(e => (typeof e === 'string' ? e.trim() : ''))
+      .filter(Boolean);
+    const errorText = errors.length > 0 ? errors.join('; ') : '';
+    const meta = `subtype=${resultMsg.subtype}, turns=${resultMsg.num_turns}, stop_reason=${resultMsg.stop_reason ?? 'null'}, session=${resultMsg.session_id}`;
+    const userMessage = errorText || `SDK结果错误(${resultMsg.subtype})，turns=${resultMsg.num_turns}, stop_reason=${resultMsg.stop_reason ?? 'null'}`;
+    const logMessage = `${meta}, errors=${errorText || '[]'}`;
+    return { userMessage, logMessage };
   }
 
   /** 提取需要持久化的 tool 详情（diff、command 等） */
