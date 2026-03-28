@@ -88,6 +88,11 @@ export class HistoryStore {
       CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
       CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
       CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
+
+      CREATE TABLE IF NOT EXISTS processed_events (
+        event_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      );
     `);
 
     // Migration: 新增 thread_key 和 resume_id 列
@@ -323,6 +328,26 @@ export class HistoryStore {
     return this.db.query(
       `SELECT * FROM sessions ORDER BY last_active_at DESC LIMIT ?`
     ).all(limit);
+  }
+
+  /** 检查飞书事件是否已处理过（原子操作：查+写） */
+  isDuplicateEvent(eventId: string): boolean {
+    const result = this.db.run(
+      'INSERT OR IGNORE INTO processed_events (event_id) VALUES (?)',
+      [eventId]
+    );
+    return result.changes === 0;
+  }
+
+  /** 清理过期的已处理事件记录 */
+  cleanupProcessedEvents(maxAgeSeconds: number = 86400): void {
+    const result = this.db.run(
+      'DELETE FROM processed_events WHERE created_at < unixepoch() - ?',
+      [maxAgeSeconds]
+    );
+    if (result.changes > 0) {
+      this.logger.info(`清理过期事件记录: ${result.changes} 条`);
+    }
   }
 
   destroy(): void {

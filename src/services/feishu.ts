@@ -37,6 +37,7 @@ export class FeishuService {
   private threadCreatedHandler?: (messageId: string, threadId: string) => void;
   private processedMessages: Set<string> = new Set();
   private messageThreadMap: Map<string, string> = new Map();
+  private dbDedupFn?: (eventId: string) => boolean;
   // PATCH 失败的消息 ID，后续不再尝试更新
   private failedPatchMessages: Set<string> = new Set();
 
@@ -71,6 +72,11 @@ export class FeishuService {
 
   setThreadCreatedHandler(handler: (messageId: string, threadId: string) => void) {
     this.threadCreatedHandler = handler;
+  }
+
+  /** 注入 DB 去重函数（HistoryStore.isDuplicateEvent），重启后兜底 */
+  setDedupFn(fn: (eventId: string) => boolean) {
+    this.dbDedupFn = fn;
   }
 
   // ─── 事件处理 ───
@@ -697,7 +703,12 @@ export class FeishuService {
   }
 
   private isDuplicateMessage(eventId: string): boolean {
+    // L1: 内存缓存
     if (this.processedMessages.has(eventId)) return true;
+    // L2: DB 兜底（重启后内存为空，靠 DB 防重复）
+    if (this.dbDedupFn) {
+      if (this.dbDedupFn(eventId)) return true;
+    }
     this.processedMessages.add(eventId);
     if (this.processedMessages.size > 1000) this.cleanupProcessedMessages();
     return false;

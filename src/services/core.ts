@@ -33,6 +33,9 @@ export class SageCore {
       );
     }
 
+    // 注入 DB 去重（重启后兜底）
+    this.feishuService.setDedupFn((eventId) => this.historyStore.isDuplicateEvent(eventId));
+
     // 回复后飞书创建 thread 时，迁移 session 映射
     this.feishuService.setThreadCreatedHandler((messageId, threadId) => {
       const msgKey = `msg:${messageId}`;
@@ -336,6 +339,7 @@ export class SageCore {
       try {
         await this.agent.cleanupSessions(24 * 60 * 60 * 1000);
         this.restoredSessions.clear();
+        this.historyStore.cleanupProcessedEvents();
       } catch (error) {
         this.logger.error('清理过期会话失败:', error);
       }
