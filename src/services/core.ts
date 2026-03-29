@@ -6,6 +6,7 @@ import type { HistoryStore } from './history-store';
 import { Logger, AppError } from '../utils';
 import { appConfig } from '../config';
 import { MessageContext } from '../types';
+import { execSync } from 'child_process';
 
 export class SageCore {
   private feishuService: FeishuService;
@@ -13,6 +14,10 @@ export class SageCore {
   private historyStore: HistoryStore;
   private logger: Logger;
   private isRunning: boolean = false;
+  private isDraining: boolean = false;
+
+  // 活跃卡片追踪：replyMessageId -> { threadKey, startTime }
+  private activeCards: Map<string, { threadKey: string; startTime: number }> = new Map();
 
   // 已在 provider 中恢复过的 session（避免重复 restoreSession）
   private restoredSessions: Set<string> = new Set();
@@ -46,11 +51,24 @@ export class SageCore {
 
   // 处理飞书消息（主入口）— 流式卡片生命周期
   private async handleFeishuMessage(ctx: MessageContext): Promise<void> {
+    // 正在关闭中，拒绝新消息
+    if (this.isDraining) {
+      this.logger.info(`服务正在关闭，忽略消息: ${ctx.messageId}`);
+      try {
+        await this.feishuService.replyCard(
+          ctx.messageId,
+          this.feishuService.buildStreamingCard([], false, '⚠️ 服务正在重启，请稍后重试。'),
+        );
+      } catch { /* best effort */ }
+      return;
+    }
+
     try {
       this.logger.info(`处理消息: openId=${ctx.openId}, threadId=${ctx.threadId || '无'}, text="${ctx.text.slice(0, 100)}"`);
 
       // 检查是否为斜杠命令
       const commandResult = this.handleSlashCommand(ctx);
+      if (commandResult === 'async') return; // 异步命令，已自行处理
       if (commandResult !== null) {
         // 命令结果用简单卡片回复
         await this.feishuService.replyCard(
@@ -88,6 +106,9 @@ export class SageCore {
         this.logger.error('发送初始卡片失败，无 messageId');
         return;
       }
+
+      // 追踪活跃卡片
+      this.activeCards.set(replyMessageId, { threadKey, startTime: Date.now() });
 
       // Step 2: 流式处理 agent 消息
       const allEvents: AgentEvent[] = [];
@@ -164,6 +185,9 @@ export class SageCore {
         this.logger.warn('发送文件附件失败:', err);
       }
 
+      // 移除活跃卡片追踪
+      this.activeCards.delete(replyMessageId);
+
       this.logger.info(`处理完成，回复长度: ${resultText.length}`);
 
     } catch (error) {
@@ -183,13 +207,17 @@ export class SageCore {
 
   // ─── 斜杠命令 ───
 
-  private handleSlashCommand(ctx: MessageContext): string | null {
+  private handleSlashCommand(ctx: MessageContext): string | null | 'async' {
     const text = ctx.text.trim();
 
     if (text === '/thread_id') return this.cmdThreadId(ctx);
     if (text === '/clear') return this.cmdClear(ctx);
     if (text === '/help') return this.cmdHelp();
     if (text === '/status') return this.cmdStatus();
+    if (text === '/restart') {
+      this.cmdRestart(ctx);
+      return 'async';
+    }
 
     return null;
   }
@@ -229,6 +257,71 @@ export class SageCore {
     return '当前话题没有活跃的上下文。';
   }
 
+  private async cmdRestart(ctx: MessageContext): Promise<void> {
+    const processName = process.env.name || appConfig.processName || 'sage';
+    this.logger.info(`收到 /restart 命令，准备优雅重启 (process: ${processName})`);
+
+    // 立即回复确认（这张卡片独立，不进 activeCards）
+    const { messageId: restartCardMsgId } = await this.feishuService.replyCard(
+      ctx.messageId,
+      this.feishuService.buildStreamingCard([], false,
+        `🔄 正在优雅重启...\n活跃卡片: ${this.activeCards.size}，等待处理完成后重启。`),
+    );
+
+    // Step 1: drain — 拒绝新消息，等待活跃卡片完成
+    this.isDraining = true;
+    this.logger.info(`/restart: 进入 drain 模式，活跃卡片: ${this.activeCards.size}`);
+
+    const DRAIN_TIMEOUT = 30_000;
+    if (this.activeCards.size > 0) {
+      const drainStart = Date.now();
+      await new Promise<void>((resolve) => {
+        const check = () => {
+          if (this.activeCards.size === 0) {
+            this.logger.info('/restart: 所有活跃卡片已完成');
+            resolve();
+            return;
+          }
+          if (Date.now() - drainStart >= DRAIN_TIMEOUT) {
+            this.logger.warn(`/restart: drain 超时，剩余 ${this.activeCards.size} 张`);
+            resolve();
+            return;
+          }
+          setTimeout(check, 500);
+        };
+        check();
+      });
+    }
+
+    // Step 2: 给残留卡片发 shutdown PATCH，然后清空追踪
+    if (this.activeCards.size > 0) {
+      const shutdownCard = this.feishuService.buildStreamingCard(
+        [], false, '⚠️ 服务正在重启，当前对话已中断。请重新发送消息继续。'
+      );
+      await Promise.allSettled(
+        Array.from(this.activeCards.keys()).map(msgId =>
+          this.feishuService.patchCard(msgId, shutdownCard).catch(() => {})
+        )
+      );
+      this.activeCards.clear();
+    }
+
+    // Step 3: 更新重启确认卡片为完成状态
+    const doneCard = this.feishuService.buildStreamingCard(
+      [], false, '✅ 服务即将重启，请稍后发送消息继续。'
+    );
+    await this.feishuService.patchCard(restartCardMsgId, doneCard).catch(() => {});
+
+    // Step 4: 调 pm2 restart，然后进程会被新实例替换
+    this.logger.info(`/restart: drain 完成，执行 pm2 restart ${processName}`);
+    try {
+      // 等待 drain 完成后再 restart，避免 pm2 kill 时 activeCards 还未清空
+      execSync(`pm2 restart ${processName}`, { timeout: 10_000 });
+    } catch {
+      // restart 会杀自己，这里大概率不会执行到
+    }
+  }
+
   private cmdHelp(): string {
     return [
       '可用命令:',
@@ -236,6 +329,7 @@ export class SageCore {
       '/thread_id - 查看当前话题 ID 和会话信息',
       '/clear - 清空当前话题的上下文',
       '/status - 查看服务状态',
+      '/restart - 优雅重启服务（等待活跃任务完成后重启）',
       '/help - 显示此帮助信息',
       '',
       '使用说明:',
@@ -248,11 +342,14 @@ export class SageCore {
 
   private cmdStatus(): string {
     const status = this.getStatus();
-    return [
+    const lines = [
       `Agent: ${this.agent.name}`,
       `运行中: ${status.isRunning ? '是' : '否'}`,
       `活跃会话: ${status.sessionCount}`,
-    ].join('\n');
+      `活跃卡片: ${this.activeCards.size}`,
+    ];
+    if (this.isDraining) lines.push('⚠️ 服务正在关闭中 (drain)');
+    return lines.join('\n');
   }
 
   // ─── 会话管理 ───
@@ -302,6 +399,15 @@ export class SageCore {
       return;
     }
 
+    // 注册信号处理，优雅退出
+    const shutdown = async (signal: string) => {
+      this.logger.info(`收到 ${signal}，开始优雅关闭...`);
+      await this.stop();
+      process.exit(0);
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+
     try {
       this.logger.info(`正在启动 Sage (agent: ${this.agent.name})...`);
       await this.agent.initialize();
@@ -321,8 +427,52 @@ export class SageCore {
       return;
     }
 
+    const DRAIN_TIMEOUT = 30_000; // 最多等 30s
+
     try {
       this.logger.info('正在停止 Sage...');
+
+      // Step 1: 进入 drain 模式，拒绝新消息
+      this.isDraining = true;
+      this.logger.info(`进入 drain 模式，当前活跃卡片: ${this.activeCards.size}`);
+
+      // Step 2: 等待活跃卡片完成（超时强制退出）
+      if (this.activeCards.size > 0) {
+        const drainStart = Date.now();
+        await new Promise<void>((resolve) => {
+          const check = () => {
+            if (this.activeCards.size === 0) {
+              this.logger.info('所有活跃卡片已完成');
+              resolve();
+              return;
+            }
+            if (Date.now() - drainStart >= DRAIN_TIMEOUT) {
+              this.logger.warn(`drain 超时 (${DRAIN_TIMEOUT}ms)，剩余 ${this.activeCards.size} 张活跃卡片`);
+              resolve();
+              return;
+            }
+            setTimeout(check, 500);
+          };
+          check();
+        });
+      }
+
+      // Step 3: 给仍在活跃的卡片发 shutdown PATCH
+      if (this.activeCards.size > 0) {
+        this.logger.info(`正在关闭 ${this.activeCards.size} 张残留卡片...`);
+        const shutdownCard = this.feishuService.buildStreamingCard(
+          [], false, '⚠️ 服务正在重启，当前对话已中断。请重新发送消息继续。'
+        );
+        const patchPromises = Array.from(this.activeCards.keys()).map(messageId =>
+          this.feishuService.patchCard(messageId, shutdownCard).catch(err => {
+            this.logger.warn(`shutdown PATCH 失败: ${messageId}`, err);
+          })
+        );
+        await Promise.allSettled(patchPromises);
+        this.activeCards.clear();
+      }
+
+      // Step 4: 停止服务
       await this.feishuService.stop();
       await this.agent.destroy();
       this.isRunning = false;
