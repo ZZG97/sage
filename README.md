@@ -1,5 +1,7 @@
 # Sage AI Assistant
 
+> ⚠️ **Sage 由 pm2 管理运行**（`sage` / `sage-dev`）。README 中的 `bun run dev` / `bun run start` 仅适用于手动本地开发调试。**Agent 禁止使用这些命令启动进程**，否则会导致端口冲突。所有进程操作只能通过 pm2。
+
 一个个人 AI 助手，通过飞书交互，支持多 Agent 后端（Claude Code / OpenCode），可执行代码、操作浏览器、完成各种任务。
 
 ## 功能特性
