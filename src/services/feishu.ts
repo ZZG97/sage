@@ -380,7 +380,7 @@ export class FeishuService {
   buildStreamingCard(events: AgentEvent[], streaming: boolean, resultText?: string): string {
     const steps: any[] = [];
     let thinkingCount = 0;
-    const textParts: string[] = [];
+    let lastTextContent = '';
     const notices: string[] = [];
 
     for (const event of events) {
@@ -401,7 +401,19 @@ export class FeishuService {
       } else if (event.type === 'notice' && event.content) {
         notices.push(event.content);
       } else if (event.type === 'text' && event.content) {
-        textParts.push(event.content);
+        // 中间文本作为步骤保留在面板中，截断过长内容
+        const truncated = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
+        steps.push({
+          tag: 'div',
+          icon: { tag: 'standard_icon', token: 'chat_outlined', color: 'grey' },
+          text: {
+            tag: 'plain_text',
+            text_color: 'grey',
+            text_size: 'notation',
+            content: truncated,
+          },
+        });
+        lastTextContent = event.content;
       }
     }
 
@@ -456,8 +468,8 @@ export class FeishuService {
       });
     }
 
-    // 文字内容：streaming 时显示中间 text，完成时显示 resultText
-    const displayText = streaming ? textParts.join('\n\n') : resultText;
+    // 文字内容：streaming 时显示最新一段中间 text，完成时显示 resultText
+    const displayText = streaming ? lastTextContent : resultText;
     if (displayText) {
       elements.push({
         tag: 'markdown',
@@ -482,7 +494,7 @@ export class FeishuService {
     }
 
     const summary = streaming
-      ? (textParts.length > 0 ? textParts[textParts.length - 1].slice(0, 100) : (steps.length > 0 ? `Working on it (${steps.length} steps)` : 'Thinking...'))
+      ? (lastTextContent ? lastTextContent.slice(0, 100) : (steps.length > 0 ? `Working on it (${steps.length} steps)` : 'Thinking...'))
       : (resultText?.slice(0, 100) || '');
 
     const card = {
@@ -609,8 +621,14 @@ export class FeishuService {
     const seen = new Set<string>();
 
     for (const match of text.matchAll(linkRegex)) {
-      const [, , filePath] = match;
-      if (!filePath || filePath.includes('://') || seen.has(filePath)) continue;
+      let [, , filePath] = match;
+      if (!filePath || seen.has(filePath)) continue;
+
+      // 兼容 file:// 前缀（Unix 绝对路径如 file:///path/to/file → /path/to/file）
+      if (filePath.startsWith('file://')) {
+        filePath = filePath.slice('file://'.length);
+      }
+      if (!filePath) continue;
 
       const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(UPLOADS_DIR, '..', filePath);
       if (!fs.existsSync(absPath)) continue;

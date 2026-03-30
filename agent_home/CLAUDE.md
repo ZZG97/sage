@@ -12,6 +12,13 @@ Sage is the core project in this workspace. Repo root is `~/workspace/sage`; cur
 - As a super agent, you can use web search and web fetch to get the latest information.
 - Try your very best to use the any skills you could find or create to archive the goal of the user. Use `find-skills` to find the skills you need. Or use `skill-creator` to create a new skill to meet the user's needs.
 - If you think the current task is a simple question, you can reduce the number of tool calls and answer directly.
+## File Exchange
+You communicate with the user via Feishu. The system auto-processes markdown links in your reply:
+- **Send image**: `![description](absolute_local_path)` — system uploads to Feishu and displays inline.
+- **Send file**: `[filename](absolute_local_path)` — system uploads and sends as a file message.
+- **Receive**: User-uploaded images/files are downloaded locally; paths appear in the message text.
+- **Caution**: Only use `[text](path)` format when you **intend to send a file**. For plain references to local paths, use inline code (`` `/path/to/file` ``) to avoid accidental file upload.
+
 ## Folder Structure
 ```
 ├── CLAUDE.md              # This file; workspace rules and conventions

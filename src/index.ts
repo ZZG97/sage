@@ -40,7 +40,7 @@ class Application {
       this.sageCore = new SageCore(agent, this.historyStore);
       this.webServer = new WebServer(this.sageCore);
 
-      // 创建调度器
+      // 创建调度器（dev 环境不启动定时任务）
       this.scheduler = new Scheduler({
         agent,
         logger: new Logger('Task'),
@@ -50,7 +50,11 @@ class Application {
       // 启动
       await this.sageCore.start();
       await this.webServer.start();
-      this.scheduler.start();
+      if (env !== 'dev') {
+        this.scheduler.start();
+      } else {
+        logger.info('开发环境，跳过定时任务调度器');
+      }
 
       logger.info('Sage AI 助手启动成功！');
       logger.info('服务正在运行，按 Ctrl+C 停止服务');
