@@ -1,4 +1,4 @@
-import { FeishuService } from './feishu';
+import { FeishuService, CARD_SIZE_LIMIT, splitMarkdownByTables } from './feishu';
 import { AgentProvider } from '../agent';
 import { FallbackAgentProvider } from '../agent/fallback-provider';
 import type { AgentEvent } from '../agent/types';
@@ -110,18 +110,20 @@ export class SageCore {
       // 追踪活跃卡片
       this.activeCards.set(replyMessageId, { threadKey, startTime: Date.now() });
 
-      // Step 2: 流式处理 agent 消息
+      // Step 2: 流式处理 agent 消息（含卡片大小保护）
       const allEvents: AgentEvent[] = [];
+      let displayEvents: AgentEvent[] = []; // 当前卡片展示的事件
       let resultText = '';
       let newSessionId: string | undefined;
       let lastPatchTime = 0;
-      const PATCH_INTERVAL = 1500; // 最小 PATCH 间隔 ms，避免频率过高
+      let currentReplyMessageId = replyMessageId;
+      const PATCH_INTERVAL = 1500;
 
       try {
         for await (const event of this.agent.sendMessageStream(sessionId, processedMessage)) {
           allEvents.push(event);
+          displayEvents.push(event);
 
-          // 检查 fallback metadata
           if ((event as any).metadata?.newSessionId) {
             newSessionId = (event as any).metadata.newSessionId;
           }
@@ -131,14 +133,48 @@ export class SageCore {
             continue;
           }
 
-          // 节流 PATCH：对可见事件（tool_call/thinking/text/notice）触发更新
+          // 节流 PATCH
           if (event.type === 'tool_call' || event.type === 'thinking' || event.type === 'text' || event.type === 'notice') {
             const now = Date.now();
             if (now - lastPatchTime >= PATCH_INTERVAL) {
-              const card = this.feishuService.buildStreamingCard(allEvents, true);
-              await this.feishuService.patchCard(replyMessageId, card).catch(err => {
-                this.logger.warn('PATCH 卡片失败:', err);
-              });
+              const card = this.feishuService.buildStreamingCard(displayEvents, true);
+
+              // 用 steps-only 卡片估算大小（排除 lastTextContent，避免中间文本导致误拆卡）
+              const stepsOnlyEvents = displayEvents.filter(e => e.type !== 'text');
+              const stepsCard = this.feishuService.buildStreamingCard(stepsOnlyEvents, true);
+              const stepsSize = Buffer.byteLength(stepsCard, 'utf-8');
+
+              if (stepsSize > CARD_SIZE_LIMIT) {
+                // steps 本身超限：关闭当前卡片，开新卡
+                const closingCard = this.feishuService.buildStreamingCard(
+                  displayEvents.slice(0, -1), false, '↓ 内容较长，后续内容见下方卡片',
+                );
+                await this.feishuService.patchCard(currentReplyMessageId, closingCard).catch(() => {});
+                this.activeCards.delete(currentReplyMessageId);
+
+                displayEvents = [event];
+                const newCard = this.feishuService.buildStreamingCard(displayEvents, true);
+                const { messageId: newMsgId } = await this.feishuService.replyCard(currentReplyMessageId, newCard);
+                if (newMsgId) {
+                  currentReplyMessageId = newMsgId;
+                  this.activeCards.set(currentReplyMessageId, { threadKey, startTime: Date.now() });
+                }
+                this.logger.info(`steps 超限 (${stepsSize}B)，已开新卡: ${currentReplyMessageId}`);
+              } else {
+                const patchOk = await this.feishuService.patchCard(currentReplyMessageId, card);
+                if (!patchOk) {
+                  // PATCH 失败（400），开新卡继续
+                  this.activeCards.delete(currentReplyMessageId);
+                  displayEvents = [event];
+                  const newCard = this.feishuService.buildStreamingCard(displayEvents, true);
+                  const { messageId: newMsgId } = await this.feishuService.replyCard(currentReplyMessageId, newCard);
+                  if (newMsgId) {
+                    currentReplyMessageId = newMsgId;
+                    this.activeCards.set(currentReplyMessageId, { threadKey, startTime: Date.now() });
+                  }
+                  this.logger.warn(`流式 PATCH 失败，已开新卡: ${currentReplyMessageId}`);
+                }
+              }
               lastPatchTime = now;
             }
           }
@@ -165,7 +201,7 @@ export class SageCore {
       // 记录 agent 事件
       this.historyStore.saveAgentEvents(threadKey, this.agent.name, allEvents);
 
-      // Step 4: 最终卡片更新（处理图片 + 关闭流式）
+      // Step 4: 最终卡片更新（处理图片 + 关闭流式 + 卡片大小/表格保护）
       let finalText = resultText;
       try {
         finalText = await this.feishuService.processImagesInMarkdown(finalText);
@@ -173,20 +209,52 @@ export class SageCore {
         this.logger.warn('处理回复中的图片失败:', err);
       }
 
-      const finalCard = this.feishuService.buildStreamingCard(allEvents, false, finalText);
-      await this.feishuService.patchCard(replyMessageId, finalCard).catch(err => {
-        this.logger.warn('最终 PATCH 卡片失败:', err);
-      });
+      // 按表格数量拆分（飞书单卡最多 5 个表格）
+      const textChunks = splitMarkdownByTables(finalText);
+      const firstChunkText = textChunks[0] || finalText;
+
+      const finalCard = this.feishuService.buildStreamingCard(displayEvents, false, firstChunkText);
+      const finalCardSize = Buffer.byteLength(finalCard, 'utf-8');
+
+      if (finalCardSize > CARD_SIZE_LIMIT) {
+        // 卡片超限：当前卡片只保留步骤，结果文本开新卡
+        this.logger.info(`最终卡片超限 (${finalCardSize}B)，steps 留当前卡，文本开新卡 (${textChunks.length} 块)`);
+        const stepsCard = this.feishuService.buildStreamingCard(displayEvents, false, '↓ 回复内容见下方卡片');
+        await this.feishuService.patchCard(currentReplyMessageId, stepsCard).catch(() => {});
+
+        for (const chunk of textChunks) {
+          const chunkCard = this.feishuService.buildStreamingCard([], false, chunk);
+          if (Buffer.byteLength(chunkCard, 'utf-8') > CARD_SIZE_LIMIT) {
+            // 单个 chunk 仍超限，降级为纯文本
+            this.logger.warn(`文本 chunk 仍超限，降级为纯文本`);
+            await this.feishuService.replyText(currentReplyMessageId, chunk);
+          } else {
+            await this.feishuService.replyCard(currentReplyMessageId, chunkCard);
+          }
+        }
+      } else {
+        const patchOk = await this.feishuService.patchCard(currentReplyMessageId, finalCard);
+        if (!patchOk) {
+          // PATCH 失败兜底：发纯文本
+          await this.feishuService.replyText(currentReplyMessageId, finalText);
+        }
+
+        // 剩余表格 chunks 作为 thread reply
+        for (let i = 1; i < textChunks.length; i++) {
+          const chunkCard = this.feishuService.buildStreamingCard([], false, textChunks[i]);
+          await this.feishuService.replyCard(currentReplyMessageId, chunkCard);
+        }
+      }
 
       // Step 5: 发送本地文件附件
       try {
-        await this.feishuService.sendLocalFileAttachments(replyMessageId, finalText);
+        await this.feishuService.sendLocalFileAttachments(currentReplyMessageId, finalText);
       } catch (err) {
         this.logger.warn('发送文件附件失败:', err);
       }
 
       // 移除活跃卡片追踪
-      this.activeCards.delete(replyMessageId);
+      this.activeCards.delete(currentReplyMessageId);
 
       this.logger.info(`处理完成，回复长度: ${resultText.length}`);
 

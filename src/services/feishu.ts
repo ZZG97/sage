@@ -28,6 +28,42 @@ const TOOL_ICONS: Record<string, string> = {
   web_search: 'search_outlined',
 };
 
+// 飞书卡片大小限制 30KB，预留 2KB buffer
+export const CARD_SIZE_LIMIT = 28 * 1024;
+
+const MAX_TABLES_PER_CARD = 5;
+const MARKDOWN_TABLE_REGEX = /^\|.+\|[ \t]*\n\|[\s:|-]+\|[ \t]*\n(?:\|.+\|[ \t]*\n?)+/gm;
+
+/** 按表格数量拆分 markdown，每块最多 maxTables 个表格 */
+export function splitMarkdownByTables(markdown: string, maxTables: number = MAX_TABLES_PER_CARD): string[] {
+  const tables = markdown.match(MARKDOWN_TABLE_REGEX);
+  if (!tables || tables.length <= maxTables) return [markdown];
+
+  const regex = new RegExp(MARKDOWN_TABLE_REGEX.source, 'gm');
+  const positions: { start: number; end: number }[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(markdown)) !== null) {
+    positions.push({ start: match.index, end: match.index + match[0].length });
+  }
+
+  const chunks: string[] = [];
+  let chunkStart = 0;
+  let count = 0;
+
+  for (let i = 0; i < positions.length; i++) {
+    count++;
+    if (count >= maxTables && i < positions.length - 1) {
+      chunks.push(markdown.slice(chunkStart, positions[i]!.end).trim());
+      chunkStart = positions[i]!.end;
+      count = 0;
+    }
+  }
+
+  const remaining = markdown.slice(chunkStart).trim();
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
 export class FeishuService {
   private client: Lark.Client;
   private wsClient: Lark.WSClient;
@@ -373,6 +409,22 @@ export class FeishuService {
         return false;
       }
       throw err;
+    }
+  }
+
+  /** 发送纯文本回复（卡片更新失败时的兜底） */
+  async replyText(messageId: string, text: string): Promise<void> {
+    try {
+      await this.client.im.v1.message.reply({
+        path: { message_id: messageId },
+        data: {
+          msg_type: 'text',
+          content: JSON.stringify({ text }),
+          reply_in_thread: true,
+        },
+      });
+    } catch (err) {
+      this.logger.warn('发送兜底文本失败:', err);
     }
   }
 
