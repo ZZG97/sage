@@ -174,9 +174,20 @@ export class FallbackAgentProvider implements AgentProvider {
     return `[上下文恢复] 由于服务切换，以下是之前的对话记录供参考：\n${historyText}\n---\n${message}`;
   }
 
-  /** 根据 sessionId 前缀路由到对应 provider */
+  /** 根据 sessionId 前缀路由到对应 provider（同类型 provider 时按实际持有的 session 判断） */
   private routeProvider(sessionId: string): AgentProvider {
+    const primaryPrefix = this.getProviderPrefix(this.primary.name);
     const fallbackPrefix = this.getProviderPrefix(this.fallback.name);
+
+    // 同类型 provider（前缀相同）：按谁实际持有 session 判断
+    if (primaryPrefix === fallbackPrefix) {
+      const inPrimary = this.primary.getActiveSessions().some(s => s.id === sessionId);
+      if (inPrimary) return this.primary;
+      const inFallback = this.fallback.getActiveSessions().some(s => s.id === sessionId);
+      if (inFallback) return this.fallback;
+      return this.primary; // 都没有，默认 primary（createSession 会用）
+    }
+
     if (fallbackPrefix && sessionId.startsWith(fallbackPrefix)) {
       return this.fallback;
     }
