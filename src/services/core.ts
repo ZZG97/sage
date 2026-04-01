@@ -16,11 +16,14 @@ export class SageCore {
   private isRunning: boolean = false;
   private isDraining: boolean = false;
 
-  // 活跃卡片追踪：replyMessageId -> { threadKey, startTime }
-  private activeCards: Map<string, { threadKey: string; startTime: number }> = new Map();
+  // 活跃卡片追踪：replyMessageId -> { threadKey, startTime, abortController }
+  private activeCards: Map<string, { threadKey: string; startTime: number; abortController: AbortController }> = new Map();
 
   // 已在 provider 中恢复过的 session（避免重复 restoreSession）
   private restoredSessions: Set<string> = new Set();
+
+  // 暂存早于 activeCards.set() 的 thread 迁移（key = msgKey，value = { cardMsgId, threadId }）
+  private pendingCardMigrations: Map<string, { cardMsgId: string; threadId: string }> = new Map();
 
   constructor(agent: AgentProvider, historyStore: HistoryStore) {
     this.logger = new Logger('SageCore');
@@ -41,10 +44,31 @@ export class SageCore {
     // 注入 DB 去重（重启后兜底）
     this.feishuService.setDedupFn((eventId) => this.historyStore.isDuplicateEvent(eventId));
 
-    // 回复后飞书创建 thread 时，迁移 session 映射
+    // 回复后飞书创建 thread 时，迁移 session 映射 + activeCards threadKey
+    // 注意：此回调在 replyCard() 返回之前就触发了（飞书发 card → 创建 thread → 回调），
+    // 所以 activeCards 可能还没有对应的 card，用 pendingCardMigrations 暂存
     this.feishuService.setThreadCreatedHandler((messageId, threadId) => {
       const msgKey = `msg:${messageId}`;
       this.historyStore.migrateSessionId(msgKey, threadId);
+
+      // 优先更新已存在的 card
+      let migrated = false;
+      for (const [cardMsgId, card] of this.activeCards) {
+        if (card.threadKey === msgKey) {
+          card.threadKey = threadId;
+          this.logger.info(`activeCard threadKey 迁移（已存在）: ${msgKey} -> ${threadId} (card: ${cardMsgId})`);
+          migrated = true;
+          break;
+        }
+      }
+
+      // 如果 activeCards 还没有（回调先于 activeCards.set() 触发），暂存等待后续处理
+      if (!migrated) {
+        // pendingMigrations 只用 msgKey 作为 lookup key，cardMsgId 字段仅用于日志
+        this.pendingCardMigrations.set(msgKey, { cardMsgId: messageId, threadId });
+        this.logger.info(`activeCard threadKey 迁移（暂存）: ${msgKey} -> ${threadId} (等待 card 注册)`);
+      }
+
       this.logger.info(`迁移 thread 会话: ${msgKey} -> ${threadId}`);
     });
   }
@@ -107,8 +131,15 @@ export class SageCore {
         return;
       }
 
-      // 追踪活跃卡片
-      this.activeCards.set(replyMessageId, { threadKey, startTime: Date.now() });
+      // 追踪活跃卡片（含 abort 控制器）
+      const abortController = new AbortController();
+      const pendingMigration = this.pendingCardMigrations.get(threadKey);
+      const resolvedThreadKey = pendingMigration ? pendingMigration.threadId : threadKey;
+      if (pendingMigration) {
+        this.pendingCardMigrations.delete(threadKey);
+        this.logger.info(`activeCard threadKey 迁移（应用暂存）: ${threadKey} -> ${resolvedThreadKey} (card: ${replyMessageId})`);
+      }
+      this.activeCards.set(replyMessageId, { threadKey: resolvedThreadKey, startTime: Date.now(), abortController });
 
       // Step 2: 流式处理 agent 消息（含卡片大小保护）
       const allEvents: AgentEvent[] = [];
@@ -120,7 +151,25 @@ export class SageCore {
       const PATCH_INTERVAL = 1500;
 
       try {
-        for await (const event of this.agent.sendMessageStream(sessionId, processedMessage)) {
+        // 用 Promise.race 实现可中断的流式消费：abort 信号能立即打断等待中的 next()
+        const stream = this.agent.sendMessageStream(sessionId, processedMessage);
+        const abortPromise = new Promise<{ done: true; value: undefined }>((resolve) => {
+          abortController.signal.addEventListener('abort', () => resolve({ done: true, value: undefined }), { once: true });
+        });
+
+        while (true) {
+          const iterResult = await Promise.race([stream.next(), abortPromise]);
+          if (iterResult.done) {
+            if (abortController.signal.aborted) {
+              this.logger.info(`任务被用户中断: ${threadKey}`);
+              resultText = '⏹ 任务已被用户中断。';
+              // 尝试关闭 generator 释放资源
+              stream.return?.(undefined as any).catch(() => {});
+            }
+            break;
+          }
+          const event = iterResult.value;
+
           allEvents.push(event);
           displayEvents.push(event);
 
@@ -157,7 +206,7 @@ export class SageCore {
                 const { messageId: newMsgId } = await this.feishuService.replyCard(currentReplyMessageId, newCard);
                 if (newMsgId) {
                   currentReplyMessageId = newMsgId;
-                  this.activeCards.set(currentReplyMessageId, { threadKey, startTime: Date.now() });
+                  this.activeCards.set(currentReplyMessageId, { threadKey, startTime: Date.now(), abortController });
                 }
                 this.logger.info(`steps 超限 (${stepsSize}B)，已开新卡: ${currentReplyMessageId}`);
               } else {
@@ -170,7 +219,7 @@ export class SageCore {
                   const { messageId: newMsgId } = await this.feishuService.replyCard(currentReplyMessageId, newCard);
                   if (newMsgId) {
                     currentReplyMessageId = newMsgId;
-                    this.activeCards.set(currentReplyMessageId, { threadKey, startTime: Date.now() });
+                    this.activeCards.set(currentReplyMessageId, { threadKey, startTime: Date.now(), abortController });
                   }
                   this.logger.warn(`流式 PATCH 失败，已开新卡: ${currentReplyMessageId}`);
                 }
@@ -280,6 +329,7 @@ export class SageCore {
 
     if (text === '/thread_id') return this.cmdThreadId(ctx);
     if (text === '/clear') return this.cmdClear(ctx);
+    if (text === '/stop') return this.cmdStop(ctx);
     if (text === '/help') return this.cmdHelp();
     if (text === '/status') return this.cmdStatus();
     if (text === '/restart') {
@@ -323,6 +373,25 @@ export class SageCore {
     }
 
     return '当前话题没有活跃的上下文。';
+  }
+
+  private cmdStop(ctx: MessageContext): string {
+    const threadKey = this.resolveThreadKey(ctx);
+
+    // 在 activeCards 中找到该 thread 的活跃任务
+    let aborted = false;
+    for (const [msgId, card] of this.activeCards) {
+      if (card.threadKey === threadKey) {
+        card.abortController.abort();
+        aborted = true;
+        this.logger.info(`用户中断任务: threadKey=${threadKey}, cardMsgId=${msgId}`);
+      }
+    }
+
+    if (aborted) {
+      return '⏹ 已中断当前任务';
+    }
+    return '当前话题没有正在执行的任务。';
   }
 
   private async cmdRestart(ctx: MessageContext): Promise<void> {
@@ -396,6 +465,7 @@ export class SageCore {
       '',
       '/thread_id - 查看当前话题 ID 和会话信息',
       '/clear - 清空当前话题的上下文',
+      '/stop - 中断当前话题正在执行的任务',
       '/status - 查看服务状态',
       '/restart - 优雅重启服务（等待活跃任务完成后重启）',
       '/help - 显示此帮助信息',
