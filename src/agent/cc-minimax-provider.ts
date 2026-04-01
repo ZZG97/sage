@@ -220,6 +220,15 @@ export class CcMinimaxProvider implements AgentProvider {
           const resultMsg = msg as SDKResultMessage;
           if (resultMsg.subtype === 'success' && 'result' in resultMsg) {
             resultText = resultMsg.result;
+          } else if (resultMsg.subtype === 'error_max_turns') {
+            // max turns 不是致命错误，保存 session 以便 resume 继续
+            this.logger.warn(`CC-MiniMax 达到最大步数: turns=${resultMsg.num_turns}, session=${resultMsg.session_id}`);
+            if (resultMsg.session_id) {
+              newSdkSessionId = resultMsg.session_id;
+            }
+            const notice = `\n\n⚠️ 已达到最大执行步数 (${resultMsg.num_turns} turns)，任务尚未完成。发送"继续"可接续当前任务。`;
+            yield { type: 'text', content: notice, ts: new Date().toISOString(), persist: true };
+            resultText = (resultText || '') + notice;
           } else if ('errors' in resultMsg) {
             const detail = this.formatSdkResultError(resultMsg as SDKResultError);
             this.logger.error(`CC-MiniMax 执行错误: ${detail.logMessage}`);
