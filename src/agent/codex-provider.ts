@@ -83,7 +83,7 @@ export class CodexProvider implements AgentProvider {
     return { text: resultText || '（无回复内容）', events };
   }
 
-  async *sendMessageStream(sessionId: string, message: string): AsyncGenerator<AgentEvent> {
+  async *sendMessageStream(sessionId: string, message: string, signal?: AbortSignal): AsyncGenerator<AgentEvent> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`会话不存在: ${sessionId}`);
@@ -114,7 +114,7 @@ export class CodexProvider implements AgentProvider {
     this.logger.info(`调用 Codex, message 长度: ${message.length}`);
 
     try {
-      const { events: eventStream } = await thread.runStreamed(message);
+      const { events: eventStream } = await thread.runStreamed(message, signal ? { signal } : undefined);
       let resultText = '';
 
       for await (const event of eventStream) {

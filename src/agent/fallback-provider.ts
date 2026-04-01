@@ -71,11 +71,11 @@ export class FallbackAgentProvider implements AgentProvider {
     return { text: resultText || '（无回复内容）', events };
   }
 
-  async *sendMessageStream(sessionId: string, message: string): AsyncGenerator<AgentEvent> {
+  async *sendMessageStream(sessionId: string, message: string, signal?: AbortSignal): AsyncGenerator<AgentEvent> {
     const provider = this.routeProvider(sessionId);
 
     try {
-      yield* provider.sendMessageStream(sessionId, message);
+      yield* provider.sendMessageStream(sessionId, message, signal);
     } catch (err: any) {
       const errSummary = this.describeError(err);
       if (provider === this.fallback || !this.isFallbackEligible(err)) {
@@ -104,7 +104,7 @@ export class FallbackAgentProvider implements AgentProvider {
       };
 
       // 代理 fallback 的流式输出，拦截 result 事件注入 metadata
-      for await (const event of this.fallback.sendMessageStream(newSession.id, enrichedMessage)) {
+      for await (const event of this.fallback.sendMessageStream(newSession.id, enrichedMessage, signal)) {
         if (event.type === 'result') {
           // 注入 newSessionId metadata（通过特殊字段，SageCore 检查）
           (event as any).metadata = { newSessionId: newSession.id };

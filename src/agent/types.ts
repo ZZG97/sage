@@ -50,7 +50,7 @@ export interface AgentProvider {
   sendMessage(sessionId: string, message: string): Promise<AgentResponse>;
 
   /** 流式发送消息，逐步 yield AgentEvent，最后 yield type='result' 事件 */
-  sendMessageStream(sessionId: string, message: string): AsyncGenerator<AgentEvent>;
+  sendMessageStream(sessionId: string, message: string, signal?: AbortSignal): AsyncGenerator<AgentEvent>;
 
   /** 删除会话 */
   deleteSession(sessionId: string): Promise<void>;

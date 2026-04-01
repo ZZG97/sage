@@ -65,7 +65,7 @@ export class OpenCodeProvider implements AgentProvider {
     return { text: resultText || '（无回复内容）', events };
   }
 
-  async *sendMessageStream(sessionId: string, message: string): AsyncGenerator<AgentEvent> {
+  async *sendMessageStream(sessionId: string, message: string, _signal?: AbortSignal): AsyncGenerator<AgentEvent> {
     const response = await this.client.session.prompt({
       body: { parts: [{ type: 'text', text: message }] },
       path: { id: sessionId },

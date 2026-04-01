@@ -152,7 +152,7 @@ export class SageCore {
 
       try {
         // 用 Promise.race 实现可中断的流式消费：abort 信号能立即打断等待中的 next()
-        const stream = this.agent.sendMessageStream(sessionId, processedMessage);
+        const stream = this.agent.sendMessageStream(sessionId, processedMessage, abortController.signal);
         const abortPromise = new Promise<{ done: true; value: undefined }>((resolve) => {
           abortController.signal.addEventListener('abort', () => resolve({ done: true, value: undefined }), { once: true });
         });

@@ -133,7 +133,7 @@ export class CcMinimaxProvider implements AgentProvider {
     return { text: resultText || '（无回复内容）', events };
   }
 
-  async *sendMessageStream(sessionId: string, message: string): AsyncGenerator<AgentEvent> {
+  async *sendMessageStream(sessionId: string, message: string, signal?: AbortSignal): AsyncGenerator<AgentEvent> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error(`会话不存在: ${sessionId}`);
@@ -155,6 +155,17 @@ export class CcMinimaxProvider implements AgentProvider {
       options.allowedTools = this.allowedTools.filter(t => !CcMinimaxProvider.DISABLED_TOOLS.includes(t));
     }
     options.disallowedTools = CcMinimaxProvider.DISABLED_TOOLS;
+
+    // 将外部 AbortSignal 桥接到 Claude SDK 的 AbortController
+    if (signal) {
+      const sdkAbortController = new AbortController();
+      if (signal.aborted) {
+        sdkAbortController.abort();
+      } else {
+        signal.addEventListener('abort', () => sdkAbortController.abort(), { once: true });
+      }
+      options.abortController = sdkAbortController;
+    }
 
     // Tavily 搜索 MCP server — 仅在配置了 API key 时启用
     if (this.tavilyApiKey) {
@@ -183,6 +194,8 @@ export class CcMinimaxProvider implements AgentProvider {
       for await (const msg of q) {
         if ('session_id' in msg && msg.session_id) {
           newSdkSessionId = msg.session_id;
+          // 立即写入，防止 abort 中断后 session_id 丢失
+          this.sdkSessionIds.set(sessionId, newSdkSessionId);
         }
 
         if (msg.type === 'assistant') {
