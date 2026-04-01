@@ -84,6 +84,7 @@ export interface AppConfig {
     port: number;
     host: string;
   };
+  processName: string;
 }
 
 // 消息处理结果
