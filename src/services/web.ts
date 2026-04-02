@@ -4,6 +4,7 @@ import { logger } from 'hono/logger';
 import { SageCore } from '../services/core';
 import { AppError } from '../utils';
 import { appConfig } from '../config';
+import { mountApps } from '../apps';
 
 export class WebServer {
   private app: Hono;
@@ -19,6 +20,7 @@ export class WebServer {
     this.app = new Hono();
     this.setupMiddleware();
     this.setupRoutes();
+    mountApps(this.app);
     this.setupErrorHandling();
   }
 
@@ -138,6 +140,9 @@ export class WebServer {
           cleanup: '/cleanup',
           feishuWebhook: '/feishu/webhook',
           testMessage: '/test/message',
+          apps: {
+            health: '/apps/health',
+          },
         },
       });
     });

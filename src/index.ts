@@ -6,6 +6,7 @@ import { registerTasks } from './services/tasks';
 import { validateConfig, getAgentConfig, getAllAvailableProviderConfigs } from './config';
 import { createAgentProvider } from './agent';
 import { Logger } from './utils';
+import { closeAllDatabases } from './shared/db';
 
 const logger = new Logger('Main');
 
@@ -81,6 +82,7 @@ class Application {
         this.scheduler.stop();
         await this.sageCore.stop();
         this.historyStore.destroy();
+        closeAllDatabases();
         logger.info('服务已完全停止');
         process.exit(0);
       } catch (error) {
