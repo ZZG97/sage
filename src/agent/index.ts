@@ -33,13 +33,17 @@ function createSingleProvider(config: AgentProviderConfig): AgentProvider {
 }
 
 /**
- * 根据配置创建 AgentProvider 实例，支持 fallback
+ * 根据配置创建 AgentProvider 实例
+ * - 单个 config → 直接返回 provider
+ * - 多个 configs → 包装为 FallbackAgentProvider（第一个为默认活跃）
  */
-export function createAgentProvider(config: AgentProviderConfig, fallbackConfig?: AgentProviderConfig | null): AgentProvider {
-  const primary = createSingleProvider(config);
-  if (fallbackConfig) {
-    const fallback = createSingleProvider(fallbackConfig);
-    return new FallbackAgentProvider(primary, fallback);
+export function createAgentProvider(configs: AgentProviderConfig[]): AgentProvider {
+  if (configs.length === 0) {
+    throw new Error('至少需要一个 provider 配置');
   }
-  return primary;
+  if (configs.length === 1) {
+    return createSingleProvider(configs[0]);
+  }
+  const providers = configs.map(c => createSingleProvider(c));
+  return new FallbackAgentProvider(providers);
 }

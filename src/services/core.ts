@@ -332,6 +332,8 @@ export class SageCore {
     if (text === '/stop') return this.cmdStop(ctx);
     if (text === '/help') return this.cmdHelp();
     if (text === '/status') return this.cmdStatus();
+    if (text.startsWith('/fallback')) return this.cmdFallback(text);
+    if (text.startsWith('/provider')) return this.cmdProvider(text);
     if (text === '/restart') {
       this.cmdRestart(ctx);
       return 'async';
@@ -467,6 +469,8 @@ export class SageCore {
       '/clear - 清空当前话题的上下文',
       '/stop - 中断当前话题正在执行的任务',
       '/status - 查看服务状态',
+      '/fallback [on|off] - 查看/切换自动降级开关',
+      '/provider [name] - 查看/切换活跃 provider',
       '/restart - 优雅重启服务（等待活跃任务完成后重启）',
       '/help - 显示此帮助信息',
       '',
@@ -486,8 +490,60 @@ export class SageCore {
       `活跃会话: ${status.sessionCount}`,
       `活跃卡片: ${this.activeCards.size}`,
     ];
+    if (this.agent instanceof FallbackAgentProvider) {
+      lines.push(`自动降级: ${this.agent.autoFallbackEnabled ? '开启' : '关闭'}`);
+      lines.push(`当前活跃: ${this.agent.activeProviderName}`);
+    }
     if (this.isDraining) lines.push('⚠️ 服务正在关闭中 (drain)');
     return lines.join('\n');
+  }
+
+  private cmdFallback(text: string): string {
+    if (!(this.agent instanceof FallbackAgentProvider)) {
+      return '当前未配置 fallback provider，无法切换。';
+    }
+
+    const arg = text.replace('/fallback', '').trim().toLowerCase();
+    if (!arg) {
+      return `自动降级: ${this.agent.autoFallbackEnabled ? '✅ 开启' : '❌ 关闭'}\n用法: /fallback on|off`;
+    }
+
+    if (arg === 'on') {
+      this.agent.setAutoFallback(true);
+      return '✅ 自动降级已开启';
+    }
+    if (arg === 'off') {
+      this.agent.setAutoFallback(false);
+      return '❌ 自动降级已关闭';
+    }
+
+    return `无效参数: ${arg}\n用法: /fallback on|off`;
+  }
+
+  private cmdProvider(text: string): string {
+    if (!(this.agent instanceof FallbackAgentProvider)) {
+      return `当前 provider: ${this.agent.name}\n仅配置了单个 provider，无法切换。`;
+    }
+
+    const arg = text.replace('/provider', '').trim();
+    if (!arg) {
+      const available = this.agent.availableProviders;
+      const active = this.agent.activeProviderName;
+      const lines = [
+        `当前活跃: ${active}`,
+        `可用 providers:`,
+        ...available.map(p => `  ${p === active ? '→' : ' '} ${p}`),
+        '',
+        '用法: /provider <name>',
+      ];
+      return lines.join('\n');
+    }
+
+    if (this.agent.switchActiveProvider(arg)) {
+      return `✅ 已切换到 ${arg}（新会话生效，已有会话不受影响）`;
+    }
+
+    return `未知 provider: ${arg}\n可用: ${this.agent.availableProviders.join(', ')}`;
   }
 
   // ─── 会话管理 ───
