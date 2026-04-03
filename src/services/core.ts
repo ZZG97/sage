@@ -696,12 +696,54 @@ export class SageCore {
     isRunning: boolean;
     agentProvider: string;
     sessionCount: number;
+    activeCards: number;
+    isDraining: boolean;
   } {
     return {
       isRunning: this.isRunning,
       agentProvider: this.agent.name,
       sessionCount: this.agent.getActiveSessions().length,
+      activeCards: this.activeCards.size,
+      isDraining: this.isDraining,
     };
+  }
+
+  /** 获取 provider 管理信息（仅 FallbackAgentProvider 时有效） */
+  getProviderInfo(): {
+    activeProvider: string;
+    availableProviders: string[];
+    autoFallbackEnabled: boolean;
+    isFallback: boolean;
+  } {
+    if (this.agent instanceof FallbackAgentProvider) {
+      return {
+        activeProvider: this.agent.activeProviderName,
+        availableProviders: this.agent.availableProviders,
+        autoFallbackEnabled: this.agent.autoFallbackEnabled,
+        isFallback: true,
+      };
+    }
+    return {
+      activeProvider: this.agent.name,
+      availableProviders: [this.agent.name],
+      autoFallbackEnabled: false,
+      isFallback: false,
+    };
+  }
+
+  /** 切换活跃 provider */
+  switchProvider(name: string): boolean {
+    if (this.agent instanceof FallbackAgentProvider) {
+      return this.agent.switchActiveProvider(name);
+    }
+    return false;
+  }
+
+  /** 设置自动降级开关 */
+  setAutoFallback(enabled: boolean): void {
+    if (this.agent instanceof FallbackAgentProvider) {
+      this.agent.setAutoFallback(enabled);
+    }
   }
 
   async cleanupSessions(): Promise<number> {

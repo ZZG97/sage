@@ -1,10 +1,13 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
+import { serveStatic } from 'hono/bun';
 import { SageCore } from '../services/core';
 import { AppError } from '../utils';
 import { appConfig } from '../config';
 import { mountApps } from '../apps';
+import { existsSync } from 'fs';
+import { join } from 'path';
 
 export class WebServer {
   private app: Hono;
@@ -16,11 +19,12 @@ export class WebServer {
     this.sageCore = sageCore;
     this.port = appConfig.server.port;
     this.host = appConfig.server.host;
-    
+
     this.app = new Hono();
     this.setupMiddleware();
     this.setupRoutes();
-    mountApps(this.app);
+    mountApps(this.app, { sageCore });
+    this.setupStaticServing();
     this.setupErrorHandling();
   }
 
@@ -33,7 +37,7 @@ export class WebServer {
       allowHeaders: ['Content-Type', 'Authorization'],
     }));
 
-    // 日志
+    // 日志（排除静态资源）
     this.app.use('*', logger());
   }
 
@@ -42,7 +46,7 @@ export class WebServer {
     // 健康检查
     this.app.get('/health', async (c) => {
       const status = this.sageCore.getStatus();
-      
+
       return c.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
@@ -78,14 +82,9 @@ export class WebServer {
     this.app.post('/feishu/webhook', async (c) => {
       try {
         const body = await c.req.json();
-        
-        // 验证请求（如果需要）
-        // const signature = c.req.header('X-Lark-Signature');
-        // const timestamp = c.req.header('X-Lark-Request-Timestamp');
-        
-        // 处理飞书事件
+
         console.log('收到飞书Webhook事件:', JSON.stringify(body, null, 2));
-        
+
         return c.json({
           success: true,
           message: '事件已接收',
@@ -103,7 +102,7 @@ export class WebServer {
     this.app.post('/test/message', async (c) => {
       try {
         const { message } = await c.req.json();
-        
+
         if (!message || typeof message !== 'string') {
           return c.json({
             success: false,
@@ -111,7 +110,6 @@ export class WebServer {
           }, 400);
         }
 
-        // 这里可以添加测试逻辑
         return c.json({
           success: true,
           message: '测试消息已接收',
@@ -128,30 +126,64 @@ export class WebServer {
       }
     });
 
-    // 根路径
-    this.app.get('/', (c) => {
-      return c.json({
-        name: 'Sage AI Assistant',
-        version: '1.0.0',
-        description: '个人内部AI助手，通过飞书交互，集成OpenCode AI能力',
-        endpoints: {
-          health: '/health',
-          status: '/status',
-          cleanup: '/cleanup',
-          feishuWebhook: '/feishu/webhook',
-          testMessage: '/test/message',
-          apps: {
-            health: '/apps/health',
+    // 根路径 — 如果有前端就 fallback 到 SPA，没有就返回 API 信息
+    // (由 setupStaticServing 处理)
+  }
+
+  // 设置静态文件服务（前端 SPA）
+  private setupStaticServing() {
+    const webDistPath = join(process.cwd(), 'web/dist');
+    const hasWebDist = existsSync(join(webDistPath, 'index.html'));
+
+    if (hasWebDist) {
+      // 静态资源（js/css/images）
+      this.app.use('/assets/*', serveStatic({ root: './web/dist' }));
+
+      // SPA fallback: 非 API 路由返回 index.html
+      const serveIndex = serveStatic({ root: './web/dist', path: '/index.html' });
+      this.app.get('/', serveIndex);
+      this.app.get('/management', serveIndex);
+      this.app.get('/health-dashboard', serveIndex);
+
+      console.log(`前端已加载: ${webDistPath}`);
+    } else {
+      // 无前端，返回 API 信息
+      this.app.get('/', (c) => {
+        return c.json({
+          name: 'Sage AI Assistant',
+          version: '1.0.0',
+          description: '个人内部AI助手，通过飞书交互，集成OpenCode AI能力',
+          endpoints: {
+            health: '/health',
+            status: '/status',
+            cleanup: '/cleanup',
+            feishuWebhook: '/feishu/webhook',
+            testMessage: '/test/message',
+            apps: {
+              health: '/apps/health',
+              management: '/apps/management',
+            },
           },
-        },
+        });
       });
-    });
+    }
   }
 
   // 设置错误处理
   private setupErrorHandling() {
     // 404处理
     this.app.notFound((c) => {
+      // SPA fallback: 非 API/apps 路径尝试返回 index.html
+      if (existsSync(join(process.cwd(), 'web/dist/index.html')) &&
+          !c.req.path.startsWith('/apps/') &&
+          !c.req.path.startsWith('/health') &&
+          !c.req.path.startsWith('/status') &&
+          !c.req.path.startsWith('/cleanup') &&
+          !c.req.path.startsWith('/feishu/') &&
+          !c.req.path.startsWith('/test/')) {
+        return c.redirect('/');
+      }
+
       return c.json({
         error: 'Not Found',
         message: '请求的接口不存在',
@@ -162,7 +194,7 @@ export class WebServer {
     // 全局错误处理
     this.app.onError((err, c) => {
       console.error('应用错误:', err);
-      
+
       if (err instanceof AppError) {
         return c.json({
           error: err.code,
@@ -183,7 +215,7 @@ export class WebServer {
   async start(): Promise<void> {
     try {
       console.log(`正在启动Web服务...`);
-      
+
       // 使用Bun的服务器
       Bun.serve({
         port: this.port,
@@ -195,7 +227,7 @@ export class WebServer {
       console.log(`服务地址: http://${this.host}:${this.port}`);
       console.log(`健康检查: http://${this.host}:${this.port}/health`);
       console.log(`服务状态: http://${this.host}:${this.port}/status`);
-      
+
     } catch (error) {
       console.error('启动Web服务失败:', error);
       throw error;
