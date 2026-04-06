@@ -38,6 +38,7 @@ nohup.out
 
 data
 
+agent_home/.playwright-mcp
 # agent memory (separate repo)
 agent_home/memory
 agent_home/wikis
