@@ -2,6 +2,7 @@
 import type { Scheduler } from '../scheduler';
 import { dailyJournal } from './daily-journal';
 import { weeklyConsolidation } from './weekly-consolidation';
+import { eveningGreeting } from './greeting';
 
 export function registerTasks(scheduler: Scheduler): void {
   scheduler.register({
@@ -14,5 +15,12 @@ export function registerTasks(scheduler: Scheduler): void {
     name: 'weekly-consolidation',
     schedule: { hour: 1, minute: 0 },
     fn: weeklyConsolidation,
+  });
+
+  scheduler.register({
+    name: 'evening-greeting',
+    schedule: { hour: 18, minute: 0 },
+    fn: eveningGreeting,
+    allowInDev: true,
   });
 }

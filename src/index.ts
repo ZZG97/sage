@@ -41,21 +41,36 @@ class Application {
       this.sageCore = new SageCore(agent, this.historyStore);
       this.webServer = new WebServer(this.sageCore);
 
-      // 创建调度器（dev 环境不启动定时任务）
+      // 创建调度器
+      const isDev = env === 'dev';
+      const ownerOpenId = process.env.OWNER_OPEN_ID || '';
       this.scheduler = new Scheduler({
         agent,
         logger: new Logger('Task'),
-      });
+        sendMessageToOwner: ownerOpenId
+          ? (text: string) => this.sageCore.sendProactiveMessage(ownerOpenId, text)
+          : undefined,
+      }, isDev);
+      if (!ownerOpenId) {
+        logger.warn('OWNER_OPEN_ID 未配置，主动消息功能不可用');
+      }
       registerTasks(this.scheduler);
+
+      // 手动触发任务的 API（测试用）
+      this.webServer.getApp().post('/scheduler/run/:name', async (c) => {
+        const name = c.req.param('name');
+        try {
+          await this.scheduler.runNow(name);
+          return c.json({ success: true, task: name });
+        } catch (error) {
+          return c.json({ success: false, error: String(error) }, 500);
+        }
+      });
 
       // 启动
       await this.sageCore.start();
       await this.webServer.start();
-      if (env !== 'dev') {
-        this.scheduler.start();
-      } else {
-        logger.info('开发环境，跳过定时任务调度器');
-      }
+      this.scheduler.start();
 
       logger.info('Sage AI 助手启动成功！');
       logger.info('服务正在运行，按 Ctrl+C 停止服务');

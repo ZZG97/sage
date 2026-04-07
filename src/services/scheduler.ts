@@ -5,12 +5,16 @@ import type { AgentProvider } from '../agent/types';
 export interface TaskContext {
   agent: AgentProvider;
   logger: Logger;
+  /** 主动向 owner 发消息（由 SageCore 注入） */
+  sendMessageToOwner?: (text: string) => Promise<void>;
 }
 
 export interface ScheduledTask {
   name: string;
   schedule: { hour: number; minute: number } | { intervalMs: number };
   fn: (ctx: TaskContext) => Promise<void>;
+  /** 是否允许在 dev 环境运行（默认 false） */
+  allowInDev?: boolean;
 }
 
 interface TaskState {
@@ -25,9 +29,11 @@ export class Scheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ctx: TaskContext;
   private logger: Logger;
+  private isDev: boolean;
 
-  constructor(ctx: TaskContext) {
+  constructor(ctx: TaskContext, isDev: boolean = false) {
     this.ctx = ctx;
+    this.isDev = isDev;
     this.logger = new Logger('Scheduler');
   }
 
@@ -83,6 +89,8 @@ export class Scheduler {
 
     for (const state of this.tasks.values()) {
       if (state.running) continue;
+      // dev 环境只跑标记了 allowInDev 的任务
+      if (this.isDev && !state.task.allowInDev) continue;
 
       const { schedule } = state.task;
 

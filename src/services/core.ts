@@ -752,4 +752,9 @@ export class SageCore {
     this.restoredSessions.clear();
     return cleaned;
   }
+
+  /** 通过 open_id 向用户主动发消息 */
+  async sendProactiveMessage(openId: string, text: string): Promise<void> {
+    await this.feishuService.sendTextToUser(openId, text);
+  }
 }

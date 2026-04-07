@@ -726,6 +726,23 @@ export class FeishuService {
     }
   }
 
+  /** 通过 open_id 向用户主动发消息 */
+  async sendTextToUser(openId: string, text: string): Promise<void> {
+    try {
+      await this.client.im.v1.message.create({
+        params: { receive_id_type: 'open_id' },
+        data: {
+          receive_id: openId,
+          content: JSON.stringify({ text }),
+          msg_type: 'text',
+        },
+      });
+      this.logger.info(`主动消息发送成功到用户 ${openId}`);
+    } catch (error) {
+      throw new AppError('发送主动消息失败', 'SEND_PROACTIVE_MESSAGE_FAILED');
+    }
+  }
+
   getThreadIdByMessageId(messageId: string): string | undefined {
     return this.messageThreadMap.get(messageId);
   }
