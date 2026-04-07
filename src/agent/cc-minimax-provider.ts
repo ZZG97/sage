@@ -3,7 +3,7 @@
 
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKResultError, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
-import { AgentProvider, AgentSession, AgentResponse, AgentEvent, AgentResultEvent, CcMinimaxProviderConfig } from './types';
+import { AgentProvider, AgentSession, AgentResponse, AgentEvent, AgentResultEvent, CcMinimaxProviderConfig, MinimaxMcpConfig } from './types';
 import { Logger } from '../utils';
 
 export class CcMinimaxProvider implements AgentProvider {
@@ -17,12 +17,13 @@ export class CcMinimaxProvider implements AgentProvider {
   private maxTurns: number;
   private allowedTools: string[];
   // MiniMax API 不兼容的工具（搜索请求会路由到 MiniMax 端点导致 400）
-  private static readonly DISABLED_TOOLS = ['WebSearch'];
+  private static readonly DISABLED_TOOLS = ['WebSearch', 'mcp__minimax__web_search', 'mcp__tavily__tavily_extract', 'mcp__tavily__tavily_crawl', 'mcp__tavily__tavily_map', 'mcp__tavily__tavily_research']
   private model: string;
   private apiKey: string;
   private baseUrl: string;
   private systemPromptAppend: string;
   private tavilyApiKey: string;
+  private minimaxMcp: MinimaxMcpConfig | undefined;
 
   constructor(config: CcMinimaxProviderConfig) {
     this.logger = new Logger('CcMinimaxProvider');
@@ -35,12 +36,21 @@ export class CcMinimaxProvider implements AgentProvider {
     this.apiKey = config.apiKey || '';
     this.baseUrl = config.baseUrl || 'https://api.minimaxi.com/anthropic';
     this.tavilyApiKey = config.tavilyApiKey || '';
+    this.minimaxMcp = config.minimaxMcp ? {
+      ...config.minimaxMcp,
+      basePath: config.minimaxMcp.basePath.startsWith('~')
+        ? config.minimaxMcp.basePath.replace('~', process.env.HOME || '')
+        : config.minimaxMcp.basePath,
+    } : undefined;
 
     if (!this.apiKey) {
       this.logger.warn('CC_MINIMAX_API_KEY 未设置，调用时会失败');
     }
     if (!this.tavilyApiKey) {
       this.logger.warn('TAVILY_API_KEY 未设置，搜索工具不可用');
+    }
+    if (!this.minimaxMcp?.apiKey) {
+      this.logger.warn('MINIMAX_API_KEY 未设置，MiniMax MCP 不可用');
     }
 
     this.systemPromptAppend = this.buildSystemPromptAppend();
@@ -62,6 +72,7 @@ export class CcMinimaxProvider implements AgentProvider {
     this.logger.info(`model: ${this.model}`);
     this.logger.info(`baseUrl: ${this.baseUrl}`);
     this.logger.info(`apiKey: ${this.apiKey ? '已设置' : '未设置'}`);
+    this.logger.info(`MiniMax MCP: ${this.minimaxMcp?.apiKey ? '已配置' : '未配置'}`);
   }
 
   async healthCheck(): Promise<boolean> {
@@ -167,15 +178,29 @@ export class CcMinimaxProvider implements AgentProvider {
       options.abortController = sdkAbortController;
     }
 
-    // Tavily 搜索 MCP server — 仅在配置了 API key 时启用
+    // MCP servers — Tavily + MiniMax MCP
+    const mcpServers: Record<string, any> = {};
     if (this.tavilyApiKey) {
-      options.mcpServers = {
-        'tavily': {
-          command: 'npx',
-          args: ['-y', 'tavily-mcp@latest'],
-          env: { TAVILY_API_KEY: this.tavilyApiKey },
+      mcpServers['tavily'] = {
+        command: 'npx',
+        args: ['-y', 'tavily-mcp@latest'],
+        env: { TAVILY_API_KEY: this.tavilyApiKey },
+      };
+    }
+    if (this.minimaxMcp?.apiKey) {
+      mcpServers['minimax'] = {
+        command: 'uvx',
+        args: ['minimax-coding-plan-mcp'],
+        env: {
+          MINIMAX_API_KEY: this.minimaxMcp.apiKey,
+          MINIMAX_MCP_BASE_PATH: this.minimaxMcp.basePath,
+          MINIMAX_API_HOST: this.minimaxMcp.apiHost || 'https://api.minimaxi.com',
+          ...(this.minimaxMcp.resourceMode ? { MINIMAX_API_RESOURCE_MODE: this.minimaxMcp.resourceMode } : {}),
         },
       };
+    }
+    if (Object.keys(mcpServers).length > 0) {
+      options.mcpServers = mcpServers;
     }
 
     const sdkSessionId = this.sdkSessionIds.get(sessionId);

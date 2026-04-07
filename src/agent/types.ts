@@ -92,6 +92,13 @@ export interface CodexProviderConfig {
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
 }
 
+export interface MinimaxMcpConfig {
+  apiKey: string;
+  basePath: string;
+  apiHost?: string;
+  resourceMode?: 'url' | 'local';
+}
+
 export interface CcMinimaxProviderConfig {
   type: 'cc-minimax';
   workDir?: string;
@@ -101,6 +108,7 @@ export interface CcMinimaxProviderConfig {
   apiKey?: string;        // MiniMax API Key
   baseUrl?: string;       // MiniMax 兼容 Anthropic 的 API 端点
   tavilyApiKey?: string;  // Tavily Search API Key（MCP 搜索工具）
+  minimaxMcp?: MinimaxMcpConfig; // MiniMax Coding Plan MCP
 }
 
 export type AgentProviderConfig = OpenCodeProviderConfig | ClaudeCodeProviderConfig | CodexProviderConfig | CcMinimaxProviderConfig;

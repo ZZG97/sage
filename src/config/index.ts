@@ -46,6 +46,12 @@ export function getProviderConfig(type: string): AgentProviderConfig | null {
         apiKey: process.env.CC_MINIMAX_API_KEY || '',
         baseUrl: process.env.CC_MINIMAX_BASE_URL || 'https://api.minimaxi.com/anthropic',
         tavilyApiKey: process.env.TAVILY_API_KEY || '',
+        minimaxMcp: process.env.MINIMAX_API_KEY ? {
+          apiKey: process.env.MINIMAX_API_KEY,
+          basePath: process.env.MINIMAX_MCP_BASE_PATH || '',
+          apiHost: process.env.MINIMAX_API_HOST || 'https://api.minimaxi.com',
+          resourceMode: (process.env.MINIMAX_API_RESOURCE_MODE as 'url' | 'local') || 'url',
+        } : undefined,
       };
 
     case 'codex':
