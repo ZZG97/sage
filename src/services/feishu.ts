@@ -6,7 +6,8 @@ import { AgentEvent } from '../agent/types';
 import { Logger, AppError } from '../utils';
 
 // 上传目录（相对于 agent_home）
-const UPLOADS_DIR = path.resolve(process.env.HOME || '', 'workspace/sage/agent_home/workspace/uploads');
+const AGENT_HOME_DIR = path.resolve(process.env.HOME || '', 'workspace/sage/agent_home');
+const UPLOADS_DIR = path.join(AGENT_HOME_DIR, 'workspace/uploads');
 const IMAGES_DIR = path.join(UPLOADS_DIR, 'images');
 const FILES_DIR = path.join(UPLOADS_DIR, 'files');
 
@@ -579,7 +580,7 @@ export class FeishuService {
 
   /** 上传本地图片到飞书，返回 image_key */
   async uploadImage(localPath: string): Promise<string> {
-    const absPath = path.isAbsolute(localPath) ? localPath : path.resolve(UPLOADS_DIR, '..', localPath);
+    const absPath = path.isAbsolute(localPath) ? localPath : path.resolve(AGENT_HOME_DIR, localPath);
     if (!fs.existsSync(absPath)) {
       throw new Error(`图片文件不存在: ${absPath}`);
     }
@@ -602,7 +603,7 @@ export class FeishuService {
 
   /** 上传本地文件到飞书，返回 file_key */
   async uploadFile(localPath: string): Promise<string> {
-    const absPath = path.isAbsolute(localPath) ? localPath : path.resolve(UPLOADS_DIR, '..', localPath);
+    const absPath = path.isAbsolute(localPath) ? localPath : path.resolve(AGENT_HOME_DIR, localPath);
     if (!fs.existsSync(absPath)) {
       throw new Error(`文件不存在: ${absPath}`);
     }
@@ -682,7 +683,7 @@ export class FeishuService {
       }
       if (!filePath) continue;
 
-      const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(UPLOADS_DIR, '..', filePath);
+      const absPath = path.isAbsolute(filePath) ? filePath : path.resolve(AGENT_HOME_DIR, filePath);
       if (!fs.existsSync(absPath)) continue;
 
       seen.add(filePath);
