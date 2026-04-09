@@ -107,11 +107,20 @@ export class SageCore {
       }
 
       // 预处理消息
-      const processedMessage = this.preprocessMessage(ctx.text);
+      let processedMessage = this.preprocessMessage(ctx.text);
 
       // 获取或创建 Thread 对应的会话
       const threadKey = this.resolveThreadKey(ctx);
-      const sessionId = await this.getOrCreateThreadSession(threadKey, ctx);
+      const { sessionId, isNew } = await this.getOrCreateThreadSession(threadKey, ctx);
+
+      // 仅在新会话首条消息时注入主动消息上下文（避免 thread 内每条消息都重复注入）
+      if (isNew && ctx.rootId) {
+        const proactiveContent = this.historyStore.getProactiveMessage(ctx.rootId);
+        if (proactiveContent) {
+          processedMessage = `[bot之前主动发给user的消息: "${proactiveContent}"  后续是user的新消息]\n\n${processedMessage}`;
+          this.logger.info(`注入主动消息上下文: rootId=${ctx.rootId}`);
+        }
+      }
 
       // 注册 session → thread 映射（供 FallbackAgentProvider 反查 threadKey）
       if (this.agent instanceof FallbackAgentProvider) {
@@ -558,7 +567,7 @@ export class SageCore {
     return ctx.threadId || `msg:${ctx.messageId}`;
   }
 
-  private async getOrCreateThreadSession(threadKey: string, ctx: MessageContext): Promise<string> {
+  private async getOrCreateThreadSession(threadKey: string, ctx: MessageContext): Promise<{ sessionId: string; isNew: boolean }> {
     const row = this.historyStore.getSession(threadKey);
 
     if (row?.agent_session_id) {
@@ -569,15 +578,17 @@ export class SageCore {
           this.logger.info(`懒恢复会话: ${threadKey} -> ${row.agent_session_id}`);
         } catch (err) {
           this.logger.warn(`恢复会话失败，将创建新会话: ${row.agent_session_id}`, err);
-          return this.createNewSession(threadKey, ctx);
+          const sessionId = await this.createNewSession(threadKey, ctx);
+          return { sessionId, isNew: true };
         }
       } else {
         this.logger.info(`复用 thread 会话: ${threadKey} -> ${row.agent_session_id}`);
       }
-      return row.agent_session_id;
+      return { sessionId: row.agent_session_id, isNew: false };
     }
 
-    return this.createNewSession(threadKey, ctx);
+    const sessionId = await this.createNewSession(threadKey, ctx);
+    return { sessionId, isNew: true };
   }
 
   private async createNewSession(threadKey: string, ctx: MessageContext): Promise<string> {
@@ -757,8 +768,13 @@ export class SageCore {
     return cleaned;
   }
 
-  /** 通过 open_id 向用户主动发消息 */
-  async sendProactiveMessage(openId: string, text: string): Promise<void> {
-    await this.feishuService.sendTextToUser(openId, text);
+  /** 通过 open_id 向用户主动发消息，记录 session 供后续回复延续 */
+  async sendProactiveMessage(openId: string, text: string): Promise<string> {
+    const messageId = await this.feishuService.sendTextToUser(openId, text);
+    if (messageId) {
+      this.historyStore.saveProactiveMessage(messageId, text, openId);
+      this.logger.info(`主动消息已记录: messageId=${messageId}`);
+    }
+    return messageId;
   }
 }

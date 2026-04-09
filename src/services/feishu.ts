@@ -727,10 +727,10 @@ export class FeishuService {
     }
   }
 
-  /** 通过 open_id 向用户主动发消息 */
-  async sendTextToUser(openId: string, text: string): Promise<void> {
+  /** 通过 open_id 向用户主动发消息，返回 message_id */
+  async sendTextToUser(openId: string, text: string): Promise<string> {
     try {
-      await this.client.im.v1.message.create({
+      const resp = await this.client.im.v1.message.create({
         params: { receive_id_type: 'open_id' },
         data: {
           receive_id: openId,
@@ -738,7 +738,9 @@ export class FeishuService {
           msg_type: 'text',
         },
       });
-      this.logger.info(`主动消息发送成功到用户 ${openId}`);
+      const messageId = (resp as any)?.data?.message_id || '';
+      this.logger.info(`主动消息发送成功到用户 ${openId}, messageId=${messageId}`);
+      return messageId;
     } catch (error) {
       throw new AppError('发送主动消息失败', 'SEND_PROACTIVE_MESSAGE_FAILED');
     }

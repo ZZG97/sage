@@ -93,6 +93,13 @@ export class HistoryStore {
         event_id TEXT PRIMARY KEY,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
       );
+
+      CREATE TABLE IF NOT EXISTS proactive_messages (
+        message_id TEXT PRIMARY KEY,
+        content TEXT NOT NULL,
+        open_id TEXT,
+        created_at TEXT NOT NULL
+      );
     `);
 
     // Migration: 新增 thread_key 和 resume_id 列
@@ -171,6 +178,22 @@ export class HistoryStore {
     }
 
     this.touchSession(sessionId);
+  }
+
+  /** 保存主动消息记录 */
+  saveProactiveMessage(messageId: string, content: string, openId?: string): void {
+    this.db.run(
+      `INSERT OR REPLACE INTO proactive_messages (message_id, content, open_id, created_at) VALUES (?, ?, ?, ?)`,
+      [messageId, content, openId ?? null, new Date().toISOString()]
+    );
+  }
+
+  /** 查询主动消息内容（通过 message_id） */
+  getProactiveMessage(messageId: string): string | null {
+    const row = this.db.query(
+      `SELECT content FROM proactive_messages WHERE message_id = ?`
+    ).get(messageId) as { content: string } | null;
+    return row?.content ?? null;
   }
 
   /** 更新 session 的 resume_id（SDK 级别的 resume ID） */
