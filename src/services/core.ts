@@ -8,6 +8,10 @@ import { appConfig } from '../config';
 import { MessageContext } from '../types';
 import { execSync } from 'child_process';
 
+// ─── 常量 ───
+const DRAIN_TIMEOUT = 30_000; // drain 最多等 30s
+const MAX_SESSION_AGE = 24 * 60 * 60 * 1000; // 会话最大存活时间 24h
+
 export class SageCore {
   private feishuService: FeishuService;
   private agent: AgentProvider;
@@ -233,79 +237,82 @@ export class SageCore {
         resultText = resultText || `处理出错: ${error.message}`;
       }
 
-      // Step 3: 处理 fallback session 迁移
-      if (newSessionId) {
-        this.historyStore.updateAgentSessionId(threadKey, newSessionId);
-        this.restoredSessions.add(newSessionId);
-        this.logger.info(`Fallback 更新会话: ${threadKey} -> ${newSessionId}`);
-      }
-
-      // 持久化 resume_id
-      const effectiveSessionId = newSessionId ?? sessionId;
-      const resumeId = this.agent.getResumeId(effectiveSessionId);
-      if (resumeId) {
-        this.historyStore.updateResumeId(threadKey, resumeId);
-      }
-
-      // 记录 agent 事件
-      this.historyStore.saveAgentEvents(threadKey, this.agent.name, allEvents);
-
-      // Step 4: 最终卡片更新（处理图片 + 关闭流式 + 卡片大小/表格保护）
-      let finalText = resultText;
+      // Step 3-5 用 try-finally 保护，确保 activeCards 一定被清理
       try {
-        finalText = await this.feishuService.processImagesInMarkdown(finalText);
-      } catch (err) {
-        this.logger.warn('处理回复中的图片失败:', err);
-      }
+        // Step 3: 处理 fallback session 迁移
+        if (newSessionId) {
+          this.historyStore.updateAgentSessionId(threadKey, newSessionId);
+          this.restoredSessions.add(newSessionId);
+          this.logger.info(`Fallback 更新会话: ${threadKey} -> ${newSessionId}`);
+        }
 
-      // 按表格数量拆分（飞书单卡最多 5 个表格）
-      const textChunks = splitMarkdownByTables(finalText);
-      const firstChunkText = textChunks[0] || finalText;
+        // 持久化 resume_id
+        const effectiveSessionId = newSessionId ?? sessionId;
+        const resumeId = this.agent.getResumeId(effectiveSessionId);
+        if (resumeId) {
+          this.historyStore.updateResumeId(threadKey, resumeId);
+        }
 
-      const finalCard = this.feishuService.buildStreamingCard(displayEvents, false, firstChunkText);
-      const finalCardSize = Buffer.byteLength(finalCard, 'utf-8');
+        // 记录 agent 事件
+        this.historyStore.saveAgentEvents(threadKey, this.agent.name, allEvents);
 
-      if (finalCardSize > CARD_SIZE_LIMIT) {
-        // 卡片超限：当前卡片只保留步骤，结果文本开新卡
-        this.logger.info(`最终卡片超限 (${finalCardSize}B)，steps 留当前卡，文本开新卡 (${textChunks.length} 块)`);
-        const stepsCard = this.feishuService.buildStreamingCard(displayEvents, false, '↓ 回复内容见下方卡片');
-        await this.feishuService.patchCard(currentReplyMessageId, stepsCard).catch(() => {});
+        // Step 4: 最终卡片更新（处理图片 + 关闭流式 + 卡片大小/表格保护）
+        let finalText = resultText;
+        try {
+          finalText = await this.feishuService.processImagesInMarkdown(finalText);
+        } catch (err) {
+          this.logger.warn('处理回复中的图片失败:', err);
+        }
 
-        for (const chunk of textChunks) {
-          const chunkCard = this.feishuService.buildStreamingCard([], false, chunk);
-          if (Buffer.byteLength(chunkCard, 'utf-8') > CARD_SIZE_LIMIT) {
-            // 单个 chunk 仍超限，降级为纯文本
-            this.logger.warn(`文本 chunk 仍超限，降级为纯文本`);
-            await this.feishuService.replyText(currentReplyMessageId, chunk);
-          } else {
+        // 按表格数量拆分（飞书单卡最多 5 个表格）
+        const textChunks = splitMarkdownByTables(finalText);
+        const firstChunkText = textChunks[0] || finalText;
+
+        const finalCard = this.feishuService.buildStreamingCard(displayEvents, false, firstChunkText);
+        const finalCardSize = Buffer.byteLength(finalCard, 'utf-8');
+
+        if (finalCardSize > CARD_SIZE_LIMIT) {
+          // 卡片超限：当前卡片只保留步骤，结果文本开新卡
+          this.logger.info(`最终卡片超限 (${finalCardSize}B)，steps 留当前卡，文本开新卡 (${textChunks.length} 块)`);
+          const stepsCard = this.feishuService.buildStreamingCard(displayEvents, false, '↓ 回复内容见下方卡片');
+          await this.feishuService.patchCard(currentReplyMessageId, stepsCard).catch(() => {});
+
+          for (const chunk of textChunks) {
+            const chunkCard = this.feishuService.buildStreamingCard([], false, chunk);
+            if (Buffer.byteLength(chunkCard, 'utf-8') > CARD_SIZE_LIMIT) {
+              // 单个 chunk 仍超限，降级为纯文本
+              this.logger.warn(`文本 chunk 仍超限，降级为纯文本`);
+              await this.feishuService.replyText(currentReplyMessageId, chunk);
+            } else {
+              await this.feishuService.replyCard(currentReplyMessageId, chunkCard);
+            }
+          }
+        } else {
+          const patchOk = await this.feishuService.patchCard(currentReplyMessageId, finalCard);
+          if (!patchOk) {
+            // PATCH 失败兜底：发纯文本
+            await this.feishuService.replyText(currentReplyMessageId, finalText);
+          }
+
+          // 剩余表格 chunks 作为 thread reply
+          for (let i = 1; i < textChunks.length; i++) {
+            const chunkCard = this.feishuService.buildStreamingCard([], false, textChunks[i]);
             await this.feishuService.replyCard(currentReplyMessageId, chunkCard);
           }
         }
-      } else {
-        const patchOk = await this.feishuService.patchCard(currentReplyMessageId, finalCard);
-        if (!patchOk) {
-          // PATCH 失败兜底：发纯文本
-          await this.feishuService.replyText(currentReplyMessageId, finalText);
+
+        // Step 5: 发送本地文件附件
+        try {
+          await this.feishuService.sendLocalFileAttachments(currentReplyMessageId, finalText);
+        } catch (err) {
+          this.logger.warn('发送文件附件失败:', err);
         }
 
-        // 剩余表格 chunks 作为 thread reply
-        for (let i = 1; i < textChunks.length; i++) {
-          const chunkCard = this.feishuService.buildStreamingCard([], false, textChunks[i]);
-          await this.feishuService.replyCard(currentReplyMessageId, chunkCard);
-        }
+        this.logger.info(`处理完成，回复长度: ${resultText.length}`);
+      } finally {
+        // 确保 activeCards 一定被清理，防止泄漏
+        this.activeCards.delete(currentReplyMessageId);
       }
-
-      // Step 5: 发送本地文件附件
-      try {
-        await this.feishuService.sendLocalFileAttachments(currentReplyMessageId, finalText);
-      } catch (err) {
-        this.logger.warn('发送文件附件失败:', err);
-      }
-
-      // 移除活跃卡片追踪
-      this.activeCards.delete(currentReplyMessageId);
-
-      this.logger.info(`处理完成，回复长度: ${resultText.length}`);
 
     } catch (error) {
       this.logger.error('处理消息失败:', error);
@@ -411,7 +418,6 @@ export class SageCore {
     this.isDraining = true;
     this.logger.info(`/restart: 进入 drain 模式，活跃卡片: ${this.activeCards.size}`);
 
-    const DRAIN_TIMEOUT = 30_000;
     if (this.activeCards.size > 0) {
       const drainStart = Date.now();
       await new Promise<void>((resolve) => {
@@ -621,8 +627,6 @@ export class SageCore {
       return;
     }
 
-    const DRAIN_TIMEOUT = 30_000; // 最多等 30s
-
     try {
       this.logger.info('正在停止 Sage...');
 
@@ -681,7 +685,7 @@ export class SageCore {
 
     setInterval(async () => {
       try {
-        await this.agent.cleanupSessions(24 * 60 * 60 * 1000);
+        await this.agent.cleanupSessions(MAX_SESSION_AGE);
         this.restoredSessions.clear();
         this.historyStore.cleanupProcessedEvents();
       } catch (error) {
@@ -747,7 +751,7 @@ export class SageCore {
   }
 
   async cleanupSessions(): Promise<number> {
-    const maxAge = 24 * 60 * 60 * 1000;
+    const maxAge = MAX_SESSION_AGE;
     const cleaned = await this.agent.cleanupSessions(maxAge);
     this.restoredSessions.clear();
     return cleaned;

@@ -5,8 +5,8 @@ import type { AgentProvider } from '../agent/types';
 export interface TaskContext {
   agent: AgentProvider;
   logger: Logger;
-  /** 主动向 owner 发消息（由 SageCore 注入） */
-  sendMessageToOwner?: (text: string) => Promise<void>;
+  /** 主动向 owner 发消息（由 SageCore 注入），返回 message_id */
+  sendMessageToOwner?: (text: string) => Promise<string | void>;
 }
 
 export interface ScheduledTask {
