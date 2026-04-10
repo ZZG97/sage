@@ -3,7 +3,7 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { serveStatic } from 'hono/bun';
 import { SageCore } from '../services/core';
-import { AppError } from '../utils';
+import { AppError, Logger } from '../utils';
 import { appConfig } from '../config';
 import { mountApps } from '../apps';
 import { existsSync } from 'fs';
@@ -14,6 +14,7 @@ export class WebServer {
   private sageCore: SageCore;
   private port: number;
   private host: string;
+  private logger = new Logger('WebServer');
 
   constructor(sageCore: SageCore) {
     this.sageCore = sageCore;
@@ -83,14 +84,14 @@ export class WebServer {
       try {
         const body = await c.req.json();
 
-        console.log('收到飞书Webhook事件:', JSON.stringify(body, null, 2));
+        this.logger.info('收到飞书Webhook事件:', JSON.stringify(body, null, 2));
 
         return c.json({
           success: true,
           message: '事件已接收',
         });
       } catch (error) {
-        console.error('处理飞书Webhook失败:', error);
+        this.logger.error('处理飞书Webhook失败:', error);
         return c.json({
           success: false,
           error: '处理失败',
@@ -145,7 +146,7 @@ export class WebServer {
       this.app.get('/management', serveIndex);
       this.app.get('/health-dashboard', serveIndex);
 
-      console.log(`前端已加载: ${webDistPath}`);
+      this.logger.info(`前端已加载: ${webDistPath}`);
     } else {
       // 无前端，返回 API 信息
       this.app.get('/', (c) => {
@@ -193,7 +194,7 @@ export class WebServer {
 
     // 全局错误处理
     this.app.onError((err, c) => {
-      console.error('应用错误:', err);
+      this.logger.error('应用错误:', err);
 
       if (err instanceof AppError) {
         return c.json({
@@ -214,7 +215,7 @@ export class WebServer {
   // 启动Web服务
   async start(): Promise<void> {
     try {
-      console.log(`正在启动Web服务...`);
+      this.logger.info('正在启动Web服务...');
 
       // 使用Bun的服务器
       Bun.serve({
@@ -223,13 +224,10 @@ export class WebServer {
         fetch: this.app.fetch,
       });
 
-      console.log(`Web服务启动成功`);
-      console.log(`服务地址: http://${this.host}:${this.port}`);
-      console.log(`健康检查: http://${this.host}:${this.port}/health`);
-      console.log(`服务状态: http://${this.host}:${this.port}/status`);
+      this.logger.info(`Web服务启动成功 http://${this.host}:${this.port}`);
 
     } catch (error) {
-      console.error('启动Web服务失败:', error);
+      this.logger.error('启动Web服务失败:', error);
       throw error;
     }
   }
