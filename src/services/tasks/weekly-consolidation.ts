@@ -3,9 +3,14 @@
 import type { TaskContext } from '../task-scheduler';
 
 export async function weeklyConsolidation(ctx: TaskContext): Promise<void> {
+  const prompt = '请整合本周日记为周记，然后整理记忆';
+  if (ctx.runAgentTask) {
+    await ctx.runAgentTask(prompt);
+    return;
+  }
   const session = await ctx.agent.createSession();
   try {
-    await ctx.agent.sendMessage(session.id, '请整合本周日记为周记，然后整理记忆');
+    await ctx.agent.sendMessage(session.id, prompt);
   } finally {
     await ctx.agent.deleteSession(session.id);
   }

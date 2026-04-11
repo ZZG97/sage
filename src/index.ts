@@ -50,6 +50,9 @@ class Application {
         sendMessageToOwner: ownerOpenId
           ? (text: string) => this.sageCore.sendProactiveMessage(ownerOpenId, text)
           : undefined,
+        runAgentTask: ownerOpenId
+          ? (prompt: string) => this.sageCore.runAgentForOwner(prompt, ownerOpenId)
+          : undefined,
       }, isDev);
       if (!ownerOpenId) {
         logger.warn('OWNER_OPEN_ID 未配置，主动消息功能不可用');
@@ -101,11 +104,19 @@ class Application {
     app.post('/scheduler/tasks', async (c) => {
       try {
         const body = await c.req.json();
-        const { message, pattern, triggerAt } = body;
-        if (!message) {
-          return c.json({ error: 'message is required' }, 400);
+        // kind: 'message'(默认, 纯文本提醒) | 'agent'(触发 agent 对话)
+        // message 字段: kind=message 时为文本；kind=agent 时为 prompt（也可通过 prompt 字段传）
+        const kind: 'message' | 'agent' = body.kind === 'agent' ? 'agent' : 'message';
+        const content = body.message ?? body.prompt;
+        if (!content) {
+          return c.json({ error: 'message (or prompt for kind=agent) is required' }, 400);
         }
-        const task = await this.scheduler.createDynamicTask({ message, pattern, triggerAt });
+        const task = await this.scheduler.createDynamicTask({
+          kind,
+          message: content,
+          pattern: body.pattern,
+          triggerAt: body.triggerAt,
+        });
         return c.json({ success: true, task });
       } catch (error) {
         return c.json({ error: String(error) }, 400);

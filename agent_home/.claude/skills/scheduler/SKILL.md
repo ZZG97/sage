@@ -29,13 +29,17 @@ user_invocable: true
 
 ```json
 {
-  "message": "要发送的消息内容",
+  "kind": "message",            // 'message'(默认,纯文本提醒) | 'agent'(触发 agent 对话)
+  "message": "要发送的消息或 prompt",
   "pattern": "30 9 * * 1-5",   // cron pattern（周期任务，二选一）
   "triggerAt": 1712345678000    // epoch ms（一次性任务，二选一）
 }
 ```
 
-- `message`（必填）：触发时发送给用户的飞书消息
+- `kind`（可选，默认 `message`）：
+  - `message` — 到点直接发一条飞书纯文本。便宜、快，适合"提醒我吃药""30分钟后叫我起床"这种静态提醒。
+  - `agent` — 到点触发一次完整的 agent 对话，结果以**流式卡片**形式发送（和用户主动对话体验一致，能看到思考/工具调用过程）。适合"每天早上帮我汇总 GitHub notifications""每周五生成工作总结"这种需要实时计算或联网的任务。每次执行创建独立 session，不共享上下文。
+- `message`（必填）：kind=message 时为文本内容；kind=agent 时作为喂给 agent 的 prompt（也可用 `prompt` 字段，两者等价）
 - `pattern`（周期）：标准 5 位 cron，时区 Asia/Shanghai
 - `triggerAt`（一次性）：Unix 毫秒时间戳，必须是未来时间
 
@@ -43,25 +47,37 @@ user_invocable: true
 
 ### 1. 解析用户意图
 
-用户输入自然语言，你需要判断：
+用户输入自然语言，你需要判断两件事：①时间维度（一次性/周期） ②是否需要 agent 能力（kind）：
 
-| 意图 | 示例 |
-|---|---|
-| 一次性提醒 | "30分钟后提醒我开会"、"今天下午3点提醒我吃药"、"明天早上9点提醒" |
-| 周期任务 | "每天早上8点提醒我喝水"、"每周五下午5点提醒写周报"、"工作日9:30提醒站会" |
-| 查看任务 | "看看我有哪些定时任务"、"我的提醒列表" |
-| 删除任务 | "取消那个喝水提醒"、"删掉明天的提醒" |
+| 意图 | kind | 示例 |
+|---|---|---|
+| 一次性提醒 | message | "30分钟后提醒我开会"、"今天下午3点提醒我吃药"、"明天早上9点提醒" |
+| 周期提醒 | message | "每天早上8点提醒我喝水"、"每周五下午5点提醒写周报"、"工作日9:30提醒站会" |
+| 一次性 agent 任务 | agent | "1小时后帮我查一下北京天气并总结"、"今晚10点帮我把今天的 git 提交汇总一下" |
+| 周期 agent 任务 | agent | "每天早上帮我汇总 GitHub notifications"、"每周五生成本周工作总结"、"每天9点帮我看看 sage-dev 有没有异常日志" |
+| 查看任务 | — | "看看我有哪些定时任务"、"我的提醒列表" |
+| 删除任务 | — | "取消那个喝水提醒"、"删掉明天的提醒" |
+
+**kind 判断原则：** 用户描述是"让系统到点发一条静态文字"就是 `message`；用户描述需要到点**做事/查信息/生成内容**才发给我，就是 `agent`。拿不准时优先问用户。
 
 ### 2. 创建一次性提醒
 
 将用户描述的时间转换为 epoch ms。当前日期由系统注入（见 CLAUDE.md 的 currentDate）。
 
 ```bash
-# 示例：30分钟后提醒
+# 示例：30分钟后提醒（纯文本）
 TRIGGER_AT=$(($(date +%s) * 1000 + 30 * 60 * 1000))
 curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
   -H "Content-Type: application/json" \
-  -d "{\"message\":\"⏰ 提醒：该开会了\",\"triggerAt\":${TRIGGER_AT}}"
+  -d "{\"kind\":\"message\",\"message\":\"⏰ 提醒：该开会了\",\"triggerAt\":${TRIGGER_AT}}"
+```
+
+```bash
+# 示例：1小时后让 agent 汇总天气（agent 类任务）
+TRIGGER_AT=$(($(date +%s) * 1000 + 60 * 60 * 1000))
+curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
+  -H "Content-Type: application/json" \
+  -d "{\"kind\":\"agent\",\"prompt\":\"帮我查一下北京天气并总结发给我\",\"triggerAt\":${TRIGGER_AT}}"
 ```
 
 ```bash
@@ -87,9 +103,15 @@ curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
 | 每天中午12点 | `0 12 * * *` |
 
 ```bash
+# 纯文本周期提醒
 curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
   -H "Content-Type: application/json" \
-  -d '{"message":"💧 该喝水了","pattern":"0 * * * *"}'
+  -d '{"kind":"message","message":"💧 该喝水了","pattern":"0 * * * *"}'
+
+# 周期 agent 任务
+curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
+  -H "Content-Type: application/json" \
+  -d '{"kind":"agent","prompt":"汇总今天的 GitHub notifications 并发给我","pattern":"0 9 * * *"}'
 ```
 
 ### 4. 查看任务
@@ -106,14 +128,16 @@ curl -s "http://localhost:$(printenv PORT)/scheduler/tasks?all=true" | python3 -
 ```
 📋 当前定时任务
 
-| # | 类型 | 消息 | 时间 | 状态 |
-|---|---|---|---|---|
-| 1 | 一次性 | 提醒开会 | 04-11 15:00 | active |
-| 2 | 周期 | 喝水提醒 | 每小时整点 | active |
+| # | 触发 | kind | 内容 | 时间 | 状态 |
+|---|---|---|---|---|---|
+| 1 | 一次性 | message | 提醒开会 | 04-11 15:00 | active |
+| 2 | 周期 | message | 喝水提醒 | 每小时整点 | active |
+| 3 | 周期 | agent | 汇总 GitHub notifications | 每天 09:00 | active |
 ```
 
 - `pattern` 有值 → 周期任务，展示 cron 的中文解释
 - `trigger_at` 有值 → 一次性，展示具体时间
+- `kind=agent` 时"内容"展示的是 prompt；卡片结果用户会看到完整 agent 输出
 - 用 `created_at` 的 epoch ms 转可读时间
 
 ### 5. 删除任务

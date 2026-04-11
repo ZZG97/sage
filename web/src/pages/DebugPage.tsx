@@ -67,6 +67,7 @@ export function DebugPage() {
       setTableLoading(true);
       setError(null);
       setRowsData(null);
+      setSelectedTable('');
       setSelectedRowIndex(0);
 
       try {

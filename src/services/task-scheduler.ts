@@ -11,8 +11,10 @@ import type { AgentProvider } from '../agent/types';
 export interface TaskContext {
   agent: AgentProvider;
   logger: Logger;
-  /** 主动向 owner 发消息（由 SageCore 注入），返回 message_id */
+  /** 主动向 owner 发纯文本消息（由 SageCore 注入），返回 message_id */
   sendMessageToOwner?: (text: string) => Promise<string | void>;
+  /** 主动触发一次 agent 任务并以流式卡片发送给 owner（由 SageCore 注入） */
+  runAgentTask?: (prompt: string) => Promise<void>;
 }
 
 /** Handler function for built-in tasks */
@@ -31,7 +33,9 @@ export interface BuiltinTaskDef {
 /** A dynamic scheduled task stored in SQLite */
 export interface DynamicTask {
   id: string;
-  /** What message to send when triggered */
+  /** 'message' = 到点发一条纯文本；'agent' = 到点触发 agent 对话并渲染成流式卡片 */
+  kind: 'message' | 'agent';
+  /** kind='message' 时：要发送的文本；kind='agent' 时：作为 agent 的 prompt */
   message: string;
   /** Cron pattern (recurring) OR null for one-shot */
   pattern: string | null;
@@ -47,7 +51,9 @@ interface TaskJobData {
   type: 'builtin' | 'dynamic';
   /** For builtin: task name; for dynamic: task id */
   task_id: string;
-  /** For dynamic: message to send */
+  /** For dynamic: kind */
+  kind?: 'message' | 'agent';
+  /** For dynamic: payload — text for 'message', prompt for 'agent' */
   message?: string;
 }
 
@@ -90,6 +96,13 @@ export class TaskScheduler {
         created_at INTEGER NOT NULL
       )
     `);
+    // Migration: 加 kind 字段（默认 'message'，兼容老数据）
+    const cols = this.db.query(`PRAGMA table_info(dynamic_tasks)`).all() as Array<{ name: string }>;
+    const hasKind = cols.some(c => c.name === 'kind');
+    if (!hasKind) {
+      this.db.exec(`ALTER TABLE dynamic_tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'message'`);
+      this.logger.info('dynamic_tasks 表迁移：新增 kind 字段');
+    }
   }
 
   /** Register a built-in task (call before start) */
@@ -153,6 +166,9 @@ export class TaskScheduler {
 
   /** Create a dynamic scheduled task (recurring or one-shot) */
   async createDynamicTask(opts: {
+    /** 任务类型：message=纯文本提醒，agent=触发 agent 对话 */
+    kind?: 'message' | 'agent';
+    /** kind='message' 时作为文本内容；kind='agent' 时作为 prompt */
     message: string;
     /** Cron pattern for recurring, e.g. "30 9 * * 1-5" */
     pattern?: string;
@@ -163,10 +179,12 @@ export class TaskScheduler {
       throw new Error('Must provide either pattern (cron) or triggerAt (one-shot)');
     }
 
+    const kind: 'message' | 'agent' = opts.kind || 'message';
     const id = crypto.randomUUID();
     const now = Date.now();
     const task: DynamicTask = {
       id,
+      kind,
       message: opts.message,
       pattern: opts.pattern || null,
       trigger_at: opts.triggerAt || null,
@@ -176,30 +194,28 @@ export class TaskScheduler {
 
     // Persist to DB
     this.db.run(
-      `INSERT INTO dynamic_tasks (id, message, pattern, trigger_at, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [task.id, task.message, task.pattern, task.trigger_at, task.status, task.created_at],
+      `INSERT INTO dynamic_tasks (id, kind, message, pattern, trigger_at, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [task.id, task.kind, task.message, task.pattern, task.trigger_at, task.status, task.created_at],
     );
 
     // Register with bunqueue
-    const jobData: TaskJobData = { type: 'dynamic', task_id: id, message: opts.message };
+    const jobData: TaskJobData = { type: 'dynamic', task_id: id, kind, message: opts.message };
 
     if (opts.triggerAt) {
-      // One-shot: use delay
       const delay = opts.triggerAt - now;
       if (delay <= 0) {
         throw new Error('triggerAt must be in the future');
       }
       await this.queue.add('task', jobData, { delay, jobId: `dynamic:${id}` });
-      this.logger.info(`创建一次性任务: ${id}, 将在 ${new Date(opts.triggerAt).toLocaleString('zh-CN', { timeZone: TIMEZONE })} 触发`);
+      this.logger.info(`创建一次性任务(${kind}): ${id}, 将在 ${new Date(opts.triggerAt).toLocaleString('zh-CN', { timeZone: TIMEZONE })} 触发`);
     } else if (opts.pattern) {
-      // Recurring: use job scheduler
       await this.queue.upsertJobScheduler(
         `dynamic:${id}`,
         { pattern: opts.pattern, timezone: TIMEZONE },
         { name: 'task', data: jobData },
       );
-      this.logger.info(`创建周期任务: ${id}, pattern=${opts.pattern}`);
+      this.logger.info(`创建周期任务(${kind}): ${id}, pattern=${opts.pattern}`);
     }
 
     return task;
@@ -255,7 +271,12 @@ export class TaskScheduler {
     let loaded = 0;
 
     for (const task of tasks) {
-      const jobData: TaskJobData = { type: 'dynamic', task_id: task.id, message: task.message };
+      const jobData: TaskJobData = {
+        type: 'dynamic',
+        task_id: task.id,
+        kind: task.kind || 'message',
+        message: task.message,
+      };
 
       if (task.trigger_at) {
         if (task.trigger_at <= now) {
@@ -282,7 +303,7 @@ export class TaskScheduler {
 
   /** Process a job from the queue */
   private async processJob(job: { data: TaskJobData }): Promise<void> {
-    const { type, task_id, message } = job.data;
+    const { type, task_id, kind, message } = job.data;
 
     if (type === 'builtin') {
       const handler = this.builtinHandlers.get(task_id);
@@ -298,20 +319,30 @@ export class TaskScheduler {
         this.logger.info(`任务完成: ${task_id} (${elapsed}s)`);
       } catch (err) {
         this.logger.error(`任务失败: ${task_id}`, err);
-        throw err; // Let bunqueue handle retry
+        throw err;
       }
     } else if (type === 'dynamic') {
-      this.logger.info(`执行动态任务: ${task_id}`);
-      if (!this.ctx.sendMessageToOwner) {
-        this.logger.warn('sendMessageToOwner 未注入，跳过动态任务');
-        return;
-      }
+      const effectiveKind = kind || 'message';
+      this.logger.info(`执行动态任务(${effectiveKind}): ${task_id}`);
 
       try {
-        await this.ctx.sendMessageToOwner(message || '(空消息)');
-        this.logger.info(`动态任务消息已发送: ${task_id}`);
+        if (effectiveKind === 'agent') {
+          if (!this.ctx.runAgentTask) {
+            this.logger.warn('runAgentTask 未注入，跳过 agent 类动态任务');
+            return;
+          }
+          await this.ctx.runAgentTask(message || '(空 prompt)');
+          this.logger.info(`动态 agent 任务已完成: ${task_id}`);
+        } else {
+          if (!this.ctx.sendMessageToOwner) {
+            this.logger.warn('sendMessageToOwner 未注入，跳过 message 类动态任务');
+            return;
+          }
+          await this.ctx.sendMessageToOwner(message || '(空消息)');
+          this.logger.info(`动态消息任务已发送: ${task_id}`);
+        }
       } catch (err) {
-        this.logger.error(`动态任务发送失败: ${task_id}`, err);
+        this.logger.error(`动态任务失败: ${task_id}`, err);
         throw err;
       }
 

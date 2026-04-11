@@ -746,6 +746,25 @@ export class FeishuService {
     }
   }
 
+  /** 通过 open_id 向用户主动发送交互卡片，返回 message_id */
+  async sendCardToUser(openId: string, cardJson: string): Promise<string> {
+    try {
+      const resp = await this.client.im.v1.message.create({
+        params: { receive_id_type: 'open_id' },
+        data: {
+          receive_id: openId,
+          content: cardJson,
+          msg_type: 'interactive',
+        },
+      });
+      const messageId = (resp as any)?.data?.message_id || '';
+      this.logger.info(`主动卡片发送成功到用户 ${openId}, messageId=${messageId}`);
+      return messageId;
+    } catch (error) {
+      throw new AppError('发送主动卡片失败', 'SEND_PROACTIVE_CARD_FAILED');
+    }
+  }
+
   getThreadIdByMessageId(messageId: string): string | undefined {
     return this.messageThreadMap.get(messageId);
   }

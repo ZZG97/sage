@@ -135,204 +135,12 @@ export class SageCore {
         agentSessionId: sessionId,
       });
 
-      // Step 1: 发送初始 "thinking" 卡片
-      const initialCard = this.feishuService.buildStreamingCard([], true);
-      const { messageId: replyMessageId } = await this.feishuService.replyCard(ctx.messageId, initialCard);
-
-      if (!replyMessageId) {
-        this.logger.error('发送初始卡片失败，无 messageId');
-        return;
-      }
-
-      // 追踪活跃卡片（含 abort 控制器）
-      const abortController = new AbortController();
-      const pendingMigration = this.pendingCardMigrations.get(threadKey);
-      const resolvedThreadKey = pendingMigration ? pendingMigration.threadId : threadKey;
-      if (pendingMigration) {
-        this.pendingCardMigrations.delete(threadKey);
-        this.logger.info(`activeCard threadKey 迁移（应用暂存）: ${threadKey} -> ${resolvedThreadKey} (card: ${replyMessageId})`);
-      }
-      this.activeCards.set(replyMessageId, { threadKey: resolvedThreadKey, startTime: Date.now(), abortController });
-
-      // Step 2: 流式处理 agent 消息（含卡片大小保护）
-      const allEvents: AgentEvent[] = [];
-      let displayEvents: AgentEvent[] = []; // 当前卡片展示的事件
-      let resultText = '';
-      let newSessionId: string | undefined;
-      let lastPatchTime = 0;
-      let currentReplyMessageId = replyMessageId;
-      const PATCH_INTERVAL = 1500;
-
-      try {
-        // 用 Promise.race 实现可中断的流式消费：abort 信号能立即打断等待中的 next()
-        const stream = this.agent.sendMessageStream(sessionId, processedMessage, abortController.signal);
-        const abortPromise = new Promise<{ done: true; value: undefined }>((resolve) => {
-          abortController.signal.addEventListener('abort', () => resolve({ done: true, value: undefined }), { once: true });
-        });
-
-        while (true) {
-          const iterResult = await Promise.race([stream.next(), abortPromise]);
-          if (iterResult.done) {
-            if (abortController.signal.aborted) {
-              this.logger.info(`任务被用户中断: ${threadKey}`);
-              resultText = '⏹ 任务已被用户中断。';
-              // 尝试关闭 generator 释放资源
-              stream.return?.(undefined as any).catch(() => {});
-            }
-            break;
-          }
-          const event = iterResult.value;
-
-          allEvents.push(event);
-          displayEvents.push(event);
-
-          if ((event as any).metadata?.newSessionId) {
-            newSessionId = (event as any).metadata.newSessionId;
-          }
-
-          if (event.type === 'result') {
-            resultText = event.content || '';
-            continue;
-          }
-
-          // 节流 PATCH
-          if (event.type === 'tool_call' || event.type === 'thinking' || event.type === 'text' || event.type === 'notice') {
-            const now = Date.now();
-            if (now - lastPatchTime >= PATCH_INTERVAL) {
-              const card = this.feishuService.buildStreamingCard(displayEvents, true);
-
-              // 用 steps-only 卡片估算大小（排除 lastTextContent，避免中间文本导致误拆卡）
-              const stepsOnlyEvents = displayEvents.filter(e => e.type !== 'text');
-              const stepsCard = this.feishuService.buildStreamingCard(stepsOnlyEvents, true);
-              const stepsSize = Buffer.byteLength(stepsCard, 'utf-8');
-
-              if (stepsSize > CARD_SIZE_LIMIT) {
-                // steps 本身超限：关闭当前卡片，开新卡
-                const closingCard = this.feishuService.buildStreamingCard(
-                  displayEvents.slice(0, -1), false, '↓ 内容较长，后续内容见下方卡片',
-                );
-                await this.feishuService.patchCard(currentReplyMessageId, closingCard).catch(() => {});
-                this.activeCards.delete(currentReplyMessageId);
-
-                displayEvents = [event];
-                const newCard = this.feishuService.buildStreamingCard(displayEvents, true);
-                const { messageId: newMsgId } = await this.feishuService.replyCard(currentReplyMessageId, newCard);
-                if (newMsgId) {
-                  currentReplyMessageId = newMsgId;
-                  this.activeCards.set(currentReplyMessageId, { threadKey, startTime: Date.now(), abortController });
-                }
-                this.logger.info(`steps 超限 (${stepsSize}B)，已开新卡: ${currentReplyMessageId}`);
-              } else {
-                const patchOk = await this.feishuService.patchCard(currentReplyMessageId, card);
-                if (!patchOk) {
-                  // PATCH 失败（400），开新卡继续
-                  this.activeCards.delete(currentReplyMessageId);
-                  displayEvents = [event];
-                  const newCard = this.feishuService.buildStreamingCard(displayEvents, true);
-                  const { messageId: newMsgId } = await this.feishuService.replyCard(currentReplyMessageId, newCard);
-                  if (newMsgId) {
-                    currentReplyMessageId = newMsgId;
-                    this.activeCards.set(currentReplyMessageId, { threadKey, startTime: Date.now(), abortController });
-                  }
-                  this.logger.warn(`流式 PATCH 失败，已开新卡: ${currentReplyMessageId}`);
-                }
-              }
-              lastPatchTime = now;
-            }
-          }
-        }
-      } catch (error: any) {
-        this.logger.error('Agent 流式处理异常:', error);
-        resultText = resultText || `处理出错: ${error.message}`;
-      }
-
-      // Step 3-5 用 try-finally 保护，确保 activeCards 一定被清理
-      try {
-        // Step 3: 处理 fallback session 迁移
-        if (newSessionId) {
-          this.historyStore.updateAgentSessionId(resolvedThreadKey, newSessionId);
-          this.restoredSessions.add(newSessionId);
-          this.logger.info(`Fallback 更新会话: ${resolvedThreadKey} -> ${newSessionId}`);
-        }
-
-        // 持久化 resume_id
-        const effectiveSessionId = newSessionId ?? sessionId;
-        const resumeId = this.agent.getResumeId(effectiveSessionId);
-        if (resumeId) {
-          this.historyStore.updateResumeId(resolvedThreadKey, resumeId);
-        }
-
-        // 记录 agent 事件
-        this.historyStore.saveAgentEvents(resolvedThreadKey, this.agent.name, allEvents);
-
-        // Step 4: 最终卡片更新（处理图片 + 关闭流式 + 卡片大小/表格保护）
-        let finalText = resultText;
-        try {
-          finalText = await this.feishuService.processImagesInMarkdown(finalText);
-        } catch (err) {
-          this.logger.warn('处理回复中的图片失败:', err);
-        }
-
-        // 按表格数量拆分（飞书单卡最多 5 个表格）
-        const textChunks = splitMarkdownByTables(finalText);
-        const firstChunkText = textChunks[0] || finalText;
-
-        const finalCard = this.feishuService.buildStreamingCard(displayEvents, false, firstChunkText);
-        const finalCardSize = Buffer.byteLength(finalCard, 'utf-8');
-
-        if (finalCardSize > CARD_SIZE_LIMIT) {
-          // 卡片超限：当前卡片只保留步骤，结果文本开新卡
-          this.logger.info(`最终卡片超限 (${finalCardSize}B)，steps 留当前卡，文本开新卡 (${textChunks.length} 块)`);
-          const stepsCard = this.feishuService.buildStreamingCard(displayEvents, false, '↓ 回复内容见下方卡片');
-          await this.feishuService.patchCard(currentReplyMessageId, stepsCard).catch(() => {});
-
-          for (const chunk of textChunks) {
-            const chunkCard = this.feishuService.buildStreamingCard([], false, chunk);
-            if (Buffer.byteLength(chunkCard, 'utf-8') > CARD_SIZE_LIMIT) {
-              // 单个 chunk 仍超限，降级为纯文本
-              this.logger.warn(`文本 chunk 仍超限，降级为纯文本`);
-              await this.feishuService.replyText(currentReplyMessageId, chunk);
-            } else {
-              await this.feishuService.replyCard(currentReplyMessageId, chunkCard);
-            }
-          }
-        } else {
-          const patchOk = await this.feishuService.patchCard(currentReplyMessageId, finalCard);
-          if (!patchOk) {
-            // PATCH 失败兜底：发纯文本
-            await this.feishuService.replyText(currentReplyMessageId, finalText);
-          }
-
-          // 剩余表格 chunks 作为 thread reply
-          for (let i = 1; i < textChunks.length; i++) {
-            const chunkCard = this.feishuService.buildStreamingCard([], false, textChunks[i]);
-            await this.feishuService.replyCard(currentReplyMessageId, chunkCard);
-          }
-        }
-
-        // Step 5: 发送本地文件附件
-        try {
-          await this.feishuService.sendLocalFileAttachments(currentReplyMessageId, finalText);
-        } catch (err) {
-          this.logger.warn('发送文件附件失败:', err);
-        }
-
-        this.logger.info(`处理完成，回复长度: ${resultText.length}`);
-      } finally {
-        // 确保 resume_id 持久化（即使中断也要保存）和 activeCards 清理
-        try {
-          const effectiveSessionId = newSessionId ?? sessionId;
-          const resumeId = this.agent.getResumeId(effectiveSessionId);
-          this.logger.info(`[resume_id debug] effectiveSessionId=${effectiveSessionId}, resumeId=${resumeId || 'undefined'}, threadKey=${resolvedThreadKey}`);
-          if (resumeId) {
-            this.historyStore.updateResumeId(resolvedThreadKey, resumeId);
-            this.logger.info(`[resume_id] 已持久化: ${resumeId}`);
-          }
-        } catch (err) {
-          this.logger.warn('持久化 resume_id 失败:', err);
-        }
-        this.activeCards.delete(currentReplyMessageId);
-      }
+      await this.runAgentToCard({
+        prompt: processedMessage,
+        threadKey,
+        sessionId,
+        anchor: { kind: 'reply', parentMessageId: ctx.messageId },
+      });
 
     } catch (error) {
       this.logger.error('处理消息失败:', error);
@@ -347,6 +155,220 @@ export class SageCore {
         } catch { /* ignore */ }
       }
     }
+  }
+
+  /**
+   * 跑 agent 并渲染成流式卡片。通用能力，既服务于用户消息回复，
+   * 也服务于调度器主动触发的 agent 任务。
+   *
+   * 调用方负责：resolve threadKey、创建/恢复 session、保存用户消息（如适用）。
+   * 本方法负责：发初始卡片 → 流式消费 agent → 节流 PATCH → 超限拆卡
+   *          → 最终卡片 → 持久化 session/resume_id/events → activeCards 清理。
+   */
+  private async runAgentToCard(opts: {
+    prompt: string;
+    threadKey: string;
+    sessionId: string;
+    anchor:
+      | { kind: 'reply'; parentMessageId: string }
+      | { kind: 'proactive'; openId: string };
+  }): Promise<{ replyMessageId: string } | null> {
+    const { prompt, threadKey, sessionId, anchor } = opts;
+
+    // Step 1: 发送初始 "thinking" 卡片
+    const initialCard = this.feishuService.buildStreamingCard([], true);
+    let replyMessageId = '';
+    if (anchor.kind === 'reply') {
+      const r = await this.feishuService.replyCard(anchor.parentMessageId, initialCard);
+      replyMessageId = r.messageId;
+    } else {
+      replyMessageId = await this.feishuService.sendCardToUser(anchor.openId, initialCard);
+    }
+
+    if (!replyMessageId) {
+      this.logger.error('发送初始卡片失败，无 messageId');
+      return null;
+    }
+
+    // 追踪活跃卡片（含 abort 控制器）
+    const abortController = new AbortController();
+    const pendingMigration = this.pendingCardMigrations.get(threadKey);
+    let resolvedThreadKey = pendingMigration ? pendingMigration.threadId : threadKey;
+    if (pendingMigration) {
+      this.pendingCardMigrations.delete(threadKey);
+      this.logger.info(`activeCard threadKey 迁移（应用暂存）: ${threadKey} -> ${resolvedThreadKey} (card: ${replyMessageId})`);
+    }
+    this.activeCards.set(replyMessageId, { threadKey: resolvedThreadKey, startTime: Date.now(), abortController });
+
+    // Step 2: 流式处理 agent 消息（含卡片大小保护）
+    const allEvents: AgentEvent[] = [];
+    let displayEvents: AgentEvent[] = []; // 当前卡片展示的事件
+    let resultText = '';
+    let newSessionId: string | undefined;
+    let lastPatchTime = 0;
+    let currentReplyMessageId = replyMessageId;
+    const PATCH_INTERVAL = 1500;
+
+    try {
+      // 用 Promise.race 实现可中断的流式消费：abort 信号能立即打断等待中的 next()
+      const stream = this.agent.sendMessageStream(sessionId, prompt, abortController.signal);
+      const abortPromise = new Promise<{ done: true; value: undefined }>((resolve) => {
+        abortController.signal.addEventListener('abort', () => resolve({ done: true, value: undefined }), { once: true });
+      });
+
+      while (true) {
+        const iterResult = await Promise.race([stream.next(), abortPromise]);
+        if (iterResult.done) {
+          if (abortController.signal.aborted) {
+            this.logger.info(`任务被用户中断: ${resolvedThreadKey}`);
+            resultText = '⏹ 任务已被用户中断。';
+            stream.return?.(undefined as any).catch(() => {});
+          }
+          break;
+        }
+        const event = iterResult.value;
+
+        allEvents.push(event);
+        displayEvents.push(event);
+
+        if ((event as any).metadata?.newSessionId) {
+          newSessionId = (event as any).metadata.newSessionId;
+        }
+
+        if (event.type === 'result') {
+          resultText = event.content || '';
+          continue;
+        }
+
+        // 节流 PATCH
+        if (event.type === 'tool_call' || event.type === 'thinking' || event.type === 'text' || event.type === 'notice') {
+          const now = Date.now();
+          if (now - lastPatchTime >= PATCH_INTERVAL) {
+            const card = this.feishuService.buildStreamingCard(displayEvents, true);
+
+            const stepsOnlyEvents = displayEvents.filter(e => e.type !== 'text');
+            const stepsCard = this.feishuService.buildStreamingCard(stepsOnlyEvents, true);
+            const stepsSize = Buffer.byteLength(stepsCard, 'utf-8');
+
+            if (stepsSize > CARD_SIZE_LIMIT) {
+              const closingCard = this.feishuService.buildStreamingCard(
+                displayEvents.slice(0, -1), false, '↓ 内容较长，后续内容见下方卡片',
+              );
+              await this.feishuService.patchCard(currentReplyMessageId, closingCard).catch(() => {});
+              this.activeCards.delete(currentReplyMessageId);
+
+              displayEvents = [event];
+              const newCard = this.feishuService.buildStreamingCard(displayEvents, true);
+              const { messageId: newMsgId } = await this.feishuService.replyCard(currentReplyMessageId, newCard);
+              if (newMsgId) {
+                currentReplyMessageId = newMsgId;
+                this.activeCards.set(currentReplyMessageId, { threadKey: resolvedThreadKey, startTime: Date.now(), abortController });
+              }
+              this.logger.info(`steps 超限 (${stepsSize}B)，已开新卡: ${currentReplyMessageId}`);
+            } else {
+              const patchOk = await this.feishuService.patchCard(currentReplyMessageId, card);
+              if (!patchOk) {
+                this.activeCards.delete(currentReplyMessageId);
+                displayEvents = [event];
+                const newCard = this.feishuService.buildStreamingCard(displayEvents, true);
+                const { messageId: newMsgId } = await this.feishuService.replyCard(currentReplyMessageId, newCard);
+                if (newMsgId) {
+                  currentReplyMessageId = newMsgId;
+                  this.activeCards.set(currentReplyMessageId, { threadKey: resolvedThreadKey, startTime: Date.now(), abortController });
+                }
+                this.logger.warn(`流式 PATCH 失败，已开新卡: ${currentReplyMessageId}`);
+              }
+            }
+            lastPatchTime = now;
+          }
+        }
+      }
+    } catch (error: any) {
+      this.logger.error('Agent 流式处理异常:', error);
+      resultText = resultText || `处理出错: ${error.message}`;
+    }
+
+    // Step 3-5 用 try-finally 保护，确保 activeCards 一定被清理
+    try {
+      // Step 3: 处理 fallback session 迁移
+      if (newSessionId) {
+        this.historyStore.updateAgentSessionId(resolvedThreadKey, newSessionId);
+        this.restoredSessions.add(newSessionId);
+        this.logger.info(`Fallback 更新会话: ${resolvedThreadKey} -> ${newSessionId}`);
+      }
+
+      const effectiveSessionId = newSessionId ?? sessionId;
+      const resumeId = this.agent.getResumeId(effectiveSessionId);
+      if (resumeId) {
+        this.historyStore.updateResumeId(resolvedThreadKey, resumeId);
+      }
+
+      // 记录 agent 事件
+      this.historyStore.saveAgentEvents(resolvedThreadKey, this.agent.name, allEvents);
+
+      // Step 4: 最终卡片更新
+      let finalText = resultText;
+      try {
+        finalText = await this.feishuService.processImagesInMarkdown(finalText);
+      } catch (err) {
+        this.logger.warn('处理回复中的图片失败:', err);
+      }
+
+      const textChunks = splitMarkdownByTables(finalText);
+      const firstChunkText = textChunks[0] || finalText;
+
+      const finalCard = this.feishuService.buildStreamingCard(displayEvents, false, firstChunkText);
+      const finalCardSize = Buffer.byteLength(finalCard, 'utf-8');
+
+      if (finalCardSize > CARD_SIZE_LIMIT) {
+        this.logger.info(`最终卡片超限 (${finalCardSize}B)，steps 留当前卡，文本开新卡 (${textChunks.length} 块)`);
+        const stepsCard = this.feishuService.buildStreamingCard(displayEvents, false, '↓ 回复内容见下方卡片');
+        await this.feishuService.patchCard(currentReplyMessageId, stepsCard).catch(() => {});
+
+        for (const chunk of textChunks) {
+          const chunkCard = this.feishuService.buildStreamingCard([], false, chunk);
+          if (Buffer.byteLength(chunkCard, 'utf-8') > CARD_SIZE_LIMIT) {
+            this.logger.warn(`文本 chunk 仍超限，降级为纯文本`);
+            await this.feishuService.replyText(currentReplyMessageId, chunk);
+          } else {
+            await this.feishuService.replyCard(currentReplyMessageId, chunkCard);
+          }
+        }
+      } else {
+        const patchOk = await this.feishuService.patchCard(currentReplyMessageId, finalCard);
+        if (!patchOk) {
+          await this.feishuService.replyText(currentReplyMessageId, finalText);
+        }
+
+        for (let i = 1; i < textChunks.length; i++) {
+          const chunkCard = this.feishuService.buildStreamingCard([], false, textChunks[i]);
+          await this.feishuService.replyCard(currentReplyMessageId, chunkCard);
+        }
+      }
+
+      // Step 5: 发送本地文件附件
+      try {
+        await this.feishuService.sendLocalFileAttachments(currentReplyMessageId, finalText);
+      } catch (err) {
+        this.logger.warn('发送文件附件失败:', err);
+      }
+
+      this.logger.info(`处理完成，回复长度: ${resultText.length}`);
+    } finally {
+      // 确保 resume_id 持久化（即使中断也要保存）和 activeCards 清理
+      try {
+        const effectiveSessionId = newSessionId ?? sessionId;
+        const resumeId = this.agent.getResumeId(effectiveSessionId);
+        if (resumeId) {
+          this.historyStore.updateResumeId(resolvedThreadKey, resumeId);
+        }
+      } catch (err) {
+        this.logger.warn('持久化 resume_id 失败:', err);
+      }
+      this.activeCards.delete(currentReplyMessageId);
+    }
+
+    return { replyMessageId: currentReplyMessageId };
   }
 
   // ─── 斜杠命令 ───
@@ -787,5 +809,40 @@ export class SageCore {
       this.logger.info(`主动消息已记录: messageId=${messageId}`);
     }
     return messageId;
+  }
+
+  /**
+   * 主动触发一次 agent 任务，结果以流式卡片形式发送给 owner。
+   * 每次执行创建独立 session，与现有 thread 不共享上下文。
+   * 用于调度器的 agent 类型任务（例如"每天早上帮我汇总 xxx"）。
+   */
+  async runAgentForOwner(prompt: string, openId: string): Promise<void> {
+    const session = await this.agent.createSession();
+    this.restoredSessions.add(session.id);
+
+    // 先用临时 threadKey 占位，Step1 拿到 replyMessageId 后迁移
+    const tmpThreadKey = `proactive:${session.id}`;
+    this.historyStore.saveUserMessage(tmpThreadKey, this.agent.name, prompt, {
+      openId,
+      chatId: '',
+      chatType: 'p2p',
+      agentSessionId: session.id,
+    });
+
+    const result = await this.runAgentToCard({
+      prompt,
+      threadKey: tmpThreadKey,
+      sessionId: session.id,
+      anchor: { kind: 'proactive', openId },
+    });
+
+    // 迁移 threadKey 到 msg:${replyMessageId}，方便后续用户在该卡片上回复时定位
+    // 同时写入 proactive_messages 表，用户回复时可注入 prompt 作为上下文
+    if (result?.replyMessageId) {
+      const finalThreadKey = `msg:${result.replyMessageId}`;
+      this.historyStore.migrateSessionId(tmpThreadKey, finalThreadKey);
+      this.historyStore.saveProactiveMessage(result.replyMessageId, `[定时任务] ${prompt}`, openId);
+      this.logger.info(`主动 agent 任务已发送: messageId=${result.replyMessageId}, session=${session.id}`);
+    }
   }
 }
