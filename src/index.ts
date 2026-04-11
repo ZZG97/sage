@@ -1,8 +1,8 @@
 import { SageCore } from './services/core';
 import { WebServer } from './services/web';
 import { HistoryStore } from './services/history-store';
-import { Scheduler } from './services/scheduler';
-import { registerTasks } from './services/tasks';
+import { TaskScheduler } from './services/task-scheduler';
+import { getBuiltinTasks } from './services/tasks';
 import { validateConfig, getAgentConfig, getAllAvailableProviderConfigs } from './config';
 import { createAgentProvider } from './agent';
 import { Logger } from './utils';
@@ -14,7 +14,7 @@ class Application {
   private sageCore!: SageCore;
   private webServer!: WebServer;
   private historyStore!: HistoryStore;
-  private scheduler!: Scheduler;
+  private scheduler!: TaskScheduler;
   private isShuttingDown: boolean = false;
 
   async start(): Promise<void> {
@@ -41,10 +41,10 @@ class Application {
       this.sageCore = new SageCore(agent, this.historyStore);
       this.webServer = new WebServer(this.sageCore);
 
-      // 创建调度器
+      // 创建调度器（bunqueue-based）
       const isDev = env === 'dev';
       const ownerOpenId = process.env.OWNER_OPEN_ID || '';
-      this.scheduler = new Scheduler({
+      this.scheduler = new TaskScheduler({
         agent,
         logger: new Logger('Task'),
         sendMessageToOwner: ownerOpenId
@@ -54,23 +54,14 @@ class Application {
       if (!ownerOpenId) {
         logger.warn('OWNER_OPEN_ID 未配置，主动消息功能不可用');
       }
-      registerTasks(this.scheduler);
 
-      // 手动触发任务的 API（测试用）
-      this.webServer.getApp().post('/scheduler/run/:name', async (c) => {
-        const name = c.req.param('name');
-        try {
-          await this.scheduler.runNow(name);
-          return c.json({ success: true, task: name });
-        } catch (error) {
-          return c.json({ success: false, error: String(error) }, 500);
-        }
-      });
+      // 注册 API 路由
+      this.setupSchedulerRoutes();
 
       // 启动
       await this.sageCore.start();
       await this.webServer.start();
-      this.scheduler.start();
+      await this.scheduler.start(getBuiltinTasks());
 
       logger.info('Sage AI 助手启动成功！');
       logger.info('服务正在运行，按 Ctrl+C 停止服务');
@@ -81,6 +72,55 @@ class Application {
       logger.error('启动失败:', error);
       process.exit(1);
     }
+  }
+
+  private setupSchedulerRoutes(): void {
+    const app = this.webServer.getApp();
+
+    // 手动触发内置任务
+    app.post('/scheduler/run/:name', async (c) => {
+      const name = c.req.param('name');
+      try {
+        await this.scheduler.runNow(name);
+        return c.json({ success: true, task: name });
+      } catch (error) {
+        return c.json({ success: false, error: String(error) }, 500);
+      }
+    });
+
+    // --- Dynamic task CRUD ---
+
+    // 列出动态任务
+    app.get('/scheduler/tasks', (c) => {
+      const all = c.req.query('all') === 'true';
+      const tasks = this.scheduler.listDynamicTasks(all);
+      return c.json({ tasks });
+    });
+
+    // 创建动态任务
+    app.post('/scheduler/tasks', async (c) => {
+      try {
+        const body = await c.req.json();
+        const { message, pattern, triggerAt } = body;
+        if (!message) {
+          return c.json({ error: 'message is required' }, 400);
+        }
+        const task = await this.scheduler.createDynamicTask({ message, pattern, triggerAt });
+        return c.json({ success: true, task });
+      } catch (error) {
+        return c.json({ error: String(error) }, 400);
+      }
+    });
+
+    // 删除动态任务
+    app.delete('/scheduler/tasks/:id', async (c) => {
+      const id = c.req.param('id');
+      const ok = await this.scheduler.removeDynamicTask(id);
+      if (!ok) {
+        return c.json({ error: 'task not found' }, 404);
+      }
+      return c.json({ success: true });
+    });
   }
 
   private setupSignalHandlers(): void {
@@ -94,7 +134,7 @@ class Application {
       logger.info(`收到 ${signal} 信号，正在优雅关闭服务...`);
 
       try {
-        this.scheduler.stop();
+        await this.scheduler.stop();
         await this.sageCore.stop();
         this.historyStore.destroy();
         closeAllDatabases();

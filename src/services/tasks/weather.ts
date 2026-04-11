@@ -1,5 +1,5 @@
 // 定时任务：每日天气播报（OpenWeatherMap）
-import type { TaskContext } from '../scheduler';
+import type { TaskContext } from '../task-scheduler';
 
 const API_BASE = 'https://api.openweathermap.org/data/2.5';
 const DEFAULT_CITY = 'Beijing';

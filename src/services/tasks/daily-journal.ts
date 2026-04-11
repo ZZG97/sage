@@ -1,5 +1,5 @@
 // 定时任务：每日日记生成（触发器，逻辑由 memory skill 执行）
-import type { TaskContext } from '../scheduler';
+import type { TaskContext } from '../task-scheduler';
 
 export async function dailyJournal(ctx: TaskContext): Promise<void> {
   const session = await ctx.agent.createSession();

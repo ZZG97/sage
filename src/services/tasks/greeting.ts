@@ -1,5 +1,5 @@
 // 定时任务：每日问候
-import type { TaskContext } from '../scheduler';
+import type { TaskContext } from '../task-scheduler';
 
 export async function eveningGreeting(ctx: TaskContext): Promise<void> {
   if (!ctx.sendMessageToOwner) {

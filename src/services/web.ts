@@ -181,7 +181,8 @@ export class WebServer {
           !c.req.path.startsWith('/status') &&
           !c.req.path.startsWith('/cleanup') &&
           !c.req.path.startsWith('/feishu/') &&
-          !c.req.path.startsWith('/test/')) {
+          !c.req.path.startsWith('/test/') &&
+          !c.req.path.startsWith('/scheduler/')) {
         return c.redirect('/');
       }
 
