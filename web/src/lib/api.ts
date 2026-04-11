@@ -111,3 +111,46 @@ export const health = {
   getMetricTrend: (name: string, limit?: number) =>
     request<MetricTrend[]>(`/apps/health/metrics/trend/${encodeURIComponent(name)}${limit ? `?limit=${limit}` : ''}`),
 };
+
+// ─── Debug API ───
+
+export interface DebugDatabaseInfo {
+  name: string;
+  tableCount: number;
+}
+
+export interface DebugTableColumn {
+  cid: number;
+  name: string;
+  type: string;
+  notnull: number;
+  dflt_value: string | null;
+  pk: number;
+}
+
+export interface DebugTableInfo {
+  name: string;
+  columns: DebugTableColumn[];
+  count: number;
+  defaultOrderBy: string | null;
+  defaultOrderDirection: 'desc';
+}
+
+export interface DebugRowsResult {
+  table: string;
+  columns: string[];
+  count: number;
+  rows: Record<string, unknown>[];
+  orderBy: string | null;
+  orderDirection: 'desc';
+}
+
+export const debugApi = {
+  getDatabases: () => request<DebugDatabaseInfo[]>('/apps/debug/databases'),
+  getTables: (database: string) =>
+    request<DebugTableInfo[]>(`/apps/debug/tables?database=${encodeURIComponent(database)}`),
+  getRows: (database: string, table: string, limit = 100) =>
+    request<DebugRowsResult>(
+      `/apps/debug/rows?database=${encodeURIComponent(database)}&table=${encodeURIComponent(table)}&limit=${limit}`,
+    ),
+};

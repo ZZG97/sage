@@ -1,6 +1,7 @@
 // App 注册表 — 所有 App 在此注册，统一挂载到 Hono
 import { Hono } from 'hono';
 import { Logger } from '../utils';
+import { createDebugRoutes } from './debug/routes';
 import { createHealthRoutes } from './health/routes';
 import { createManagementRoutes } from './management/routes';
 import type { SageCore } from '../services/core';
@@ -20,6 +21,7 @@ interface AppDefinition {
 
 // 注册所有 App
 const apps: AppDefinition[] = [
+  { name: 'debug', path: '/apps/debug', createRoutes: () => createDebugRoutes() },
   { name: 'health', path: '/apps/health', createRoutes: () => createHealthRoutes() },
   { name: 'management', path: '/apps/management', createRoutes: (ctx) => createManagementRoutes(ctx.sageCore) },
 ];

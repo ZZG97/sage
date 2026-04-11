@@ -4,6 +4,7 @@ import { clsx } from 'clsx';
 const navItems = [
   { to: '/management', label: 'Management' },
   { to: '/health-dashboard', label: 'Health' },
+  { to: '/debug', label: 'Debug' },
 ];
 
 export function Layout() {
