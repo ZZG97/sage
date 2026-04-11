@@ -250,20 +250,20 @@ export class SageCore {
       try {
         // Step 3: 处理 fallback session 迁移
         if (newSessionId) {
-          this.historyStore.updateAgentSessionId(threadKey, newSessionId);
+          this.historyStore.updateAgentSessionId(resolvedThreadKey, newSessionId);
           this.restoredSessions.add(newSessionId);
-          this.logger.info(`Fallback 更新会话: ${threadKey} -> ${newSessionId}`);
+          this.logger.info(`Fallback 更新会话: ${resolvedThreadKey} -> ${newSessionId}`);
         }
 
         // 持久化 resume_id
         const effectiveSessionId = newSessionId ?? sessionId;
         const resumeId = this.agent.getResumeId(effectiveSessionId);
         if (resumeId) {
-          this.historyStore.updateResumeId(threadKey, resumeId);
+          this.historyStore.updateResumeId(resolvedThreadKey, resumeId);
         }
 
         // 记录 agent 事件
-        this.historyStore.saveAgentEvents(threadKey, this.agent.name, allEvents);
+        this.historyStore.saveAgentEvents(resolvedThreadKey, this.agent.name, allEvents);
 
         // Step 4: 最终卡片更新（处理图片 + 关闭流式 + 卡片大小/表格保护）
         let finalText = resultText;
@@ -319,7 +319,18 @@ export class SageCore {
 
         this.logger.info(`处理完成，回复长度: ${resultText.length}`);
       } finally {
-        // 确保 activeCards 一定被清理，防止泄漏
+        // 确保 resume_id 持久化（即使中断也要保存）和 activeCards 清理
+        try {
+          const effectiveSessionId = newSessionId ?? sessionId;
+          const resumeId = this.agent.getResumeId(effectiveSessionId);
+          this.logger.info(`[resume_id debug] effectiveSessionId=${effectiveSessionId}, resumeId=${resumeId || 'undefined'}, threadKey=${resolvedThreadKey}`);
+          if (resumeId) {
+            this.historyStore.updateResumeId(resolvedThreadKey, resumeId);
+            this.logger.info(`[resume_id] 已持久化: ${resumeId}`);
+          }
+        } catch (err) {
+          this.logger.warn('持久化 resume_id 失败:', err);
+        }
         this.activeCards.delete(currentReplyMessageId);
       }
 
