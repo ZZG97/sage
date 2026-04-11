@@ -82,8 +82,9 @@ export class TaskScheduler {
     });
     this.queue.setStallConfig({ enabled: false });
 
-    // Init SQLite for dynamic tasks
-    const dbPath = resolve(import.meta.dir, '../../data/scheduler.db');
+    // Init SQLite for dynamic tasks (dev uses separate DB to avoid cross-firing)
+    const dbFile = isDev ? 'scheduler-dev.db' : 'scheduler.db';
+    const dbPath = resolve(import.meta.dir, `../../data/${dbFile}`);
     this.db = new Database(dbPath, { create: true });
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec(`

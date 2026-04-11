@@ -145,6 +145,7 @@ export class WebServer {
       this.app.get('/', serveIndex);
       this.app.get('/management', serveIndex);
       this.app.get('/health-dashboard', serveIndex);
+      this.app.get('/debug', serveIndex);
 
       this.logger.info(`前端已加载: ${webDistPath}`);
     } else {
@@ -172,10 +173,12 @@ export class WebServer {
 
   // 设置错误处理
   private setupErrorHandling() {
+    const webIndexPath = join(process.cwd(), 'web/dist/index.html');
+
     // 404处理
     this.app.notFound((c) => {
       // SPA fallback: 非 API/apps 路径尝试返回 index.html
-      if (existsSync(join(process.cwd(), 'web/dist/index.html')) &&
+      if (existsSync(webIndexPath) &&
           !c.req.path.startsWith('/apps/') &&
           !c.req.path.startsWith('/health') &&
           !c.req.path.startsWith('/status') &&
@@ -183,7 +186,9 @@ export class WebServer {
           !c.req.path.startsWith('/feishu/') &&
           !c.req.path.startsWith('/test/') &&
           !c.req.path.startsWith('/scheduler/')) {
-        return c.redirect('/');
+        return new Response(Bun.file(webIndexPath), {
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        });
       }
 
       return c.json({

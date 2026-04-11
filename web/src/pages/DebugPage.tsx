@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Card, CardTitle, StatValue } from '@/components/Card';
 import {
   debugApi,
@@ -38,6 +38,9 @@ export function DebugPage() {
   const [rowLoading, setRowLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadVersion, setReloadVersion] = useState(0);
+  const selectedTableInfo = tables.find((table) => table.name === selectedTable) ?? null;
+  const tableRequestIdRef = useRef(0);
+  const rowRequestIdRef = useRef(0);
 
   useEffect(() => {
     const loadDatabases = async () => {
@@ -62,28 +65,28 @@ export function DebugPage() {
 
   useEffect(() => {
     if (!selectedDatabase) return;
+    const requestId = ++tableRequestIdRef.current;
 
     const loadTables = async () => {
       setTableLoading(true);
       setError(null);
+      setTables([]);
       setRowsData(null);
       setSelectedTable('');
       setSelectedRowIndex(0);
 
       try {
         const tableList = await debugApi.getTables(selectedDatabase);
+        if (tableRequestIdRef.current !== requestId) return;
         setTables(tableList);
-        setSelectedTable((current) => {
-          if (current && tableList.some((table) => table.name === current)) {
-            return current;
-          }
-          return tableList[0]?.name ?? '';
-        });
+        setSelectedTable(tableList[0]?.name ?? '');
       } catch (err: any) {
+        if (tableRequestIdRef.current !== requestId) return;
         setError(err.message || '加载表失败');
         setTables([]);
         setSelectedTable('');
       } finally {
+        if (tableRequestIdRef.current !== requestId) return;
         setTableLoading(false);
       }
     };
@@ -92,28 +95,31 @@ export function DebugPage() {
   }, [selectedDatabase, reloadVersion]);
 
   useEffect(() => {
-    if (!selectedDatabase || !selectedTable) return;
+    if (!selectedDatabase || tableLoading || !selectedTableInfo) return;
+    const requestId = ++rowRequestIdRef.current;
 
     const loadRows = async () => {
       setRowLoading(true);
       setError(null);
 
       try {
-        const result = await debugApi.getRows(selectedDatabase, selectedTable, 100);
+        const result = await debugApi.getRows(selectedDatabase, selectedTableInfo.name, 100);
+        if (rowRequestIdRef.current !== requestId) return;
         setRowsData(result);
         setSelectedRowIndex(0);
       } catch (err: any) {
+        if (rowRequestIdRef.current !== requestId) return;
         setError(err.message || '加载数据失败');
         setRowsData(null);
       } finally {
+        if (rowRequestIdRef.current !== requestId) return;
         setRowLoading(false);
       }
     };
 
     void loadRows();
-  }, [selectedDatabase, selectedTable, reloadVersion]);
+  }, [selectedDatabase, tableLoading, selectedTableInfo, reloadVersion]);
 
-  const selectedTableInfo = tables.find((table) => table.name === selectedTable) ?? null;
   const selectedRow = rowsData?.rows[selectedRowIndex] ?? null;
 
   if (loading) {
