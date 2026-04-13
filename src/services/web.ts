@@ -140,6 +140,9 @@ export class WebServer {
       // 静态资源（js/css/images）
       this.app.use('/assets/*', serveStatic({ root: './web/dist' }));
 
+      // agent_home 上传文件（健康记录附件等）
+      this.app.use('/uploads/*', serveStatic({ root: './agent_home/workspace' }));
+
       // SPA fallback: 非 API 路由返回 index.html
       const serveIndex = serveStatic({ root: './web/dist', path: '/index.html' });
       this.app.get('/', serveIndex);

@@ -79,6 +79,7 @@ export interface MedicalRecord {
   treatment: string | null;
   doctor_advice: string | null;
   follow_up_date: string | null;
+  attachments: string | null;
   summary: string | null;
   created_at: string;
 }

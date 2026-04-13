@@ -29,6 +29,12 @@ export class SageCore {
   // 暂存早于 activeCards.set() 的 thread 迁移（key = msgKey，value = { cardMsgId, threadId }）
   private pendingCardMigrations: Map<string, { cardMsgId: string; threadId: string }> = new Map();
 
+  // per-thread 消息排队：正在处理的 thread + 排队中的消息
+  private processingThreads: Set<string> = new Set();
+  private pendingMessages: Map<string, MessageContext[]> = new Map();
+  // thread 迁移映射：msg:xxx -> omt_xxx（排队消费时追踪迁移后的 key）
+  private threadKeyMigrations: Map<string, string> = new Map();
+
   constructor(agent: AgentProvider, historyStore: HistoryStore) {
     this.logger = new Logger('SageCore');
     this.agent = agent;
@@ -73,11 +79,27 @@ export class SageCore {
         this.logger.info(`activeCard threadKey 迁移（暂存）: ${msgKey} -> ${threadId} (等待 card 注册)`);
       }
 
+      // 记录迁移映射（供消费队列时追踪）
+      this.threadKeyMigrations.set(msgKey, threadId);
+
+      // 同步迁移消息排队相关的数据结构
+      if (this.processingThreads.has(msgKey)) {
+        this.processingThreads.delete(msgKey);
+        this.processingThreads.add(threadId);
+        this.logger.info(`processingThreads 迁移: ${msgKey} -> ${threadId}`);
+      }
+      if (this.pendingMessages.has(msgKey)) {
+        const queue = this.pendingMessages.get(msgKey)!;
+        this.pendingMessages.delete(msgKey);
+        this.pendingMessages.set(threadId, queue);
+        this.logger.info(`pendingMessages 迁移: ${msgKey} -> ${threadId}`);
+      }
+
       this.logger.info(`迁移 thread 会话: ${msgKey} -> ${threadId}`);
     });
   }
 
-  // 处理飞书消息（主入口）— 流式卡片生命周期
+  // 处理飞书消息（主入口）— 排队 + 流式卡片生命周期
   private async handleFeishuMessage(ctx: MessageContext): Promise<void> {
     // 正在关闭中，拒绝新消息
     if (this.isDraining) {
@@ -91,26 +113,82 @@ export class SageCore {
       return;
     }
 
+    // 斜杠命令不排队，立即处理
+    const commandResult = this.handleSlashCommand(ctx);
+    if (commandResult === 'async') return;
+    if (commandResult !== null) {
+      await this.feishuService.replyCard(
+        ctx.messageId,
+        this.feishuService.buildStreamingCard([], false, commandResult),
+      );
+      return;
+    }
+
+    const threadKey = this.resolveThreadKey(ctx);
+
+    // 如果该 thread 正在处理中，排队等待
+    // 需要同时检查原始 key 和可能已迁移的 key（activeCards 的 threadKey 在 thread 创建回调中被更新）
+    const queueKey = this.findProcessingKey(threadKey);
+    if (queueKey) {
+      const queue = this.pendingMessages.get(queueKey) || [];
+      queue.push(ctx);
+      this.pendingMessages.set(queueKey, queue);
+      this.logger.info(`消息排队: threadKey=${threadKey}, queueKey=${queueKey}, 队列长度=${queue.length}, text="${ctx.text.slice(0, 50)}"`);
+      return; // 不阻塞，当前处理完后会自动消费队列
+    }
+
+    // 标记开始处理（threadKey 可能在处理中被迁移，用 currentKey 追踪）
+    this.processingThreads.add(threadKey);
+    let currentKey = threadKey;
+
+    try {
+      await this.processThreadMessage(ctx, threadKey);
+
+      // 处理完后消费队列中的排队消息
+      // 注意：threadKey 可能已被迁移（msg:xxx -> omt_xxx），需要查当前有效 key
+      currentKey = this.processingThreads.has(threadKey) ? threadKey : this.findMigratedKey(threadKey);
+
+      while (true) {
+        const queue = this.pendingMessages.get(currentKey);
+        if (!queue || queue.length === 0) {
+          this.pendingMessages.delete(currentKey);
+          break;
+        }
+
+        // 取出所有排队消息，合并成一条
+        const queuedMessages = queue.splice(0);
+        this.pendingMessages.delete(currentKey);
+
+        const mergedText = queuedMessages.map(m => this.preprocessMessage(m.text)).join('\n');
+        const lastCtx = queuedMessages[queuedMessages.length - 1]; // 用最后一条消息的 ctx 回复
+        const hint = queuedMessages.length === 1
+          ? `[用户在你处理上一条消息期间追加了1条新消息]\n\n`
+          : `[用户在你处理上一条消息期间追加了${queuedMessages.length}条新消息]\n\n`;
+
+        this.logger.info(`消费排队消息: currentKey=${currentKey}, 合并${queuedMessages.length}条`);
+
+        // 构造合并后的 ctx 用于处理
+        const mergedCtx: MessageContext = { ...lastCtx, text: hint + mergedText };
+        await this.processThreadMessage(mergedCtx, currentKey);
+      }
+    } finally {
+      this.processingThreads.delete(currentKey);
+      // 兜底：如果迁移发生了，原始 key 也清理
+      if (currentKey !== threadKey) this.processingThreads.delete(threadKey);
+      // 清理迁移映射
+      this.threadKeyMigrations.delete(threadKey);
+    }
+  }
+
+  // 实际处理单条（或合并后的）消息
+  private async processThreadMessage(ctx: MessageContext, threadKey: string): Promise<void> {
     try {
       this.logger.info(`处理消息: openId=${ctx.openId}, threadId=${ctx.threadId || '无'}, text="${ctx.text.slice(0, 100)}"`);
-
-      // 检查是否为斜杠命令
-      const commandResult = this.handleSlashCommand(ctx);
-      if (commandResult === 'async') return; // 异步命令，已自行处理
-      if (commandResult !== null) {
-        // 命令结果用简单卡片回复
-        await this.feishuService.replyCard(
-          ctx.messageId,
-          this.feishuService.buildStreamingCard([], false, commandResult),
-        );
-        return;
-      }
 
       // 预处理消息
       let processedMessage = this.preprocessMessage(ctx.text);
 
       // 获取或创建 Thread 对应的会话
-      const threadKey = this.resolveThreadKey(ctx);
       const { sessionId, isNew } = await this.getOrCreateThreadSession(threadKey, ctx);
 
       // 仅在新会话首条消息时注入主动消息上下文（避免 thread 内每条消息都重复注入）
@@ -146,7 +224,6 @@ export class SageCore {
       this.logger.error('处理消息失败:', error);
 
       if (error instanceof AppError) {
-        // 尝试发送错误卡片
         try {
           await this.feishuService.replyCard(
             ctx.messageId,
@@ -598,6 +675,27 @@ export class SageCore {
 
   private resolveThreadKey(ctx: MessageContext): string {
     return ctx.threadId || `msg:${ctx.messageId}`;
+  }
+
+  /**
+   * 查找 threadKey 对应的正在处理中的 key。
+   * 迁移后 processingThreads 里已经是 omt_xxx，直接匹配即可。
+   * 返回 null 表示没有正在处理。
+   */
+  private findProcessingKey(threadKey: string): string | null {
+    if (this.processingThreads.has(threadKey)) return threadKey;
+    return null;
+  }
+
+  /**
+   * 查找原始 threadKey 迁移后的 key。
+   * threadCreatedHandler 中 msg:xxx → omt_xxx 迁移会记录到 threadKeyMigrations。
+   */
+  private findMigratedKey(originalKey: string): string {
+    if (this.processingThreads.has(originalKey)) return originalKey;
+    const migrated = this.threadKeyMigrations.get(originalKey);
+    if (migrated) return migrated;
+    return originalKey;
   }
 
   private async getOrCreateThreadSession(threadKey: string, ctx: MessageContext): Promise<{ sessionId: string; isNew: boolean }> {

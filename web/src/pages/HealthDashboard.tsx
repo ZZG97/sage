@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { health, type HealthStats, type MedicalRecord, type Medication } from '@/lib/api';
 import { useQuery } from '@/lib/hooks';
 import { Card, CardTitle, StatValue } from '@/components/Card';
@@ -46,9 +46,82 @@ function RecordRow({ record, onClick }: { record: MedicalRecord; onClick: () => 
   );
 }
 
+function ImageViewer({ images, startIndex, onClose }: { images: { url: string; name: string }[]; startIndex: number; onClose: () => void }) {
+  const [index, setIndex] = useState(startIndex);
+  const touchRef = useRef<{ startX: number; startY: number } | null>(null);
+
+  const prev = useCallback(() => setIndex((i) => (i > 0 ? i - 1 : images.length - 1)), [images.length]);
+  const next = useCallback(() => setIndex((i) => (i < images.length - 1 ? i + 1 : 0)), [images.length]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowLeft') prev();
+    else if (e.key === 'ArrowRight') next();
+    else if (e.key === 'Escape') onClose();
+  }, [prev, next, onClose]);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchRef.current = { startX: e.touches[0].clientX, startY: e.touches[0].clientY };
+  };
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (!touchRef.current) return;
+    const dx = e.changedTouches[0].clientX - touchRef.current.startX;
+    const dy = e.changedTouches[0].clientY - touchRef.current.startY;
+    touchRef.current = null;
+    if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx)) return;
+    if (dx < 0) next(); else prev();
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/90 flex flex-col items-center justify-center z-[60]"
+      onClick={onClose}
+      onKeyDown={handleKeyDown}
+      tabIndex={0}
+      autoFocus
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
+    >
+      {/* Close */}
+      <button className="absolute top-4 right-4 text-white/70 hover:text-white text-3xl z-10" onClick={onClose}>&times;</button>
+
+      {/* Counter */}
+      {images.length > 1 && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 text-white/70 text-sm">{index + 1} / {images.length}</div>
+      )}
+
+      {/* Prev/Next buttons (desktop) */}
+      {images.length > 1 && (
+        <>
+          <button className="absolute left-2 top-1/2 -translate-y-1/2 text-white/50 hover:text-white text-4xl hidden sm:block" onClick={(e) => { e.stopPropagation(); prev(); }}>&lsaquo;</button>
+          <button className="absolute right-2 top-1/2 -translate-y-1/2 text-white/50 hover:text-white text-4xl hidden sm:block" onClick={(e) => { e.stopPropagation(); next(); }}>&rsaquo;</button>
+        </>
+      )}
+
+      {/* Image */}
+      <img
+        src={images[index].url}
+        alt={images[index].name}
+        className="max-w-[90vw] max-h-[85vh] object-contain select-none"
+        onClick={(e) => e.stopPropagation()}
+        draggable={false}
+      />
+    </div>
+  );
+}
+
 function RecordDetail({ record, onClose }: { record: any; onClose: () => void }) {
   const diagnoses = parseJsonArray(record.diagnosis);
   const meds = parseJsonArray(record.medications);
+  const [viewerIndex, setViewerIndex] = useState<number | null>(null);
+
+  const attachments = parseJsonArray(record.attachments);
+  const imageAtts = attachments
+    .map((att, i) => ({ att, origIndex: i }))
+    .filter(({ att }) => /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(att));
+  const imageItems = imageAtts.map(({ att }) => ({
+    url: '/' + att.replace(/^workspace\//, ''),
+    name: att.split('/').pop() || 'image',
+  }));
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={onClose}>
@@ -114,6 +187,37 @@ function RecordDetail({ record, onClose }: { record: any; onClose: () => void })
             <div className="text-xs font-semibold text-[var(--color-text-secondary)] mb-1">摘要</div>
             <p className="text-sm">{record.summary}</p>
           </div>
+        )}
+
+        {attachments.length > 0 && (
+          <div className="mb-3">
+            <div className="text-xs font-semibold text-[var(--color-text-secondary)] mb-1">附件</div>
+            <div className="grid grid-cols-2 gap-2">
+              {attachments.map((att, i) => {
+                const url = '/' + att.replace(/^workspace\//, '');
+                const name = att.split('/').pop() || 'file';
+                const isImage = /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(att);
+                if (isImage) {
+                  const imgIdx = imageAtts.findIndex(({ origIndex }) => origIndex === i);
+                  return (
+                    <button key={i} onClick={() => setViewerIndex(imgIdx)} className="block rounded overflow-hidden border border-[var(--color-border)] hover:opacity-80 transition-opacity cursor-pointer">
+                      <img src={url} alt={name} className="w-full h-32 object-cover" />
+                    </button>
+                  );
+                }
+                return (
+                  <a key={i} href={url} download={name} className="flex items-center gap-2 px-3 py-2 rounded border border-[var(--color-border)] hover:bg-[var(--color-bg-hover)] transition-colors text-sm">
+                    <span className="text-lg">📎</span>
+                    <span className="truncate">{name}</span>
+                  </a>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {viewerIndex !== null && (
+          <ImageViewer images={imageItems} startIndex={viewerIndex} onClose={() => setViewerIndex(null)} />
         )}
 
         {record.metrics?.length > 0 && (
