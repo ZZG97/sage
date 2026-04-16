@@ -20,20 +20,19 @@ export class SageCore {
   private isRunning: boolean = false;
   private isDraining: boolean = false;
 
-  // 活跃卡片追踪：replyMessageId -> { threadKey, startTime, abortController }
-  private activeCards: Map<string, { threadKey: string; startTime: number; abortController: AbortController }> = new Map();
+  // 活跃卡片追踪：replyMessageId -> { conversationId, startTime, abortController }
+  private activeCards: Map<string, { conversationId: string; startTime: number; abortController: AbortController }> = new Map();
 
   // 已在 provider 中恢复过的 session（避免重复 restoreSession）
   private restoredSessions: Set<string> = new Set();
 
-  // 暂存早于 activeCards.set() 的 thread 迁移（key = msgKey，value = { cardMsgId, threadId }）
-  private pendingCardMigrations: Map<string, { cardMsgId: string; threadId: string }> = new Map();
+  // 运行期飞书标识到内部 conversation 的查找缓存。
+  private messageConversations: Map<string, string> = new Map();
+  private threadConversations: Map<string, string> = new Map();
 
-  // per-thread 消息排队：正在处理的 thread + 排队中的消息
-  private processingThreads: Set<string> = new Set();
+  // per-conversation 消息排队：正在处理的 conversation + 排队中的消息
+  private processingConversations: Set<string> = new Set();
   private pendingMessages: Map<string, MessageContext[]> = new Map();
-  // thread 迁移映射：msg:xxx -> omt_xxx（排队消费时追踪迁移后的 key）
-  private threadKeyMigrations: Map<string, string> = new Map();
 
   constructor(agent: AgentProvider, historyStore: HistoryStore) {
     this.logger = new Logger('SageCore');
@@ -46,56 +45,37 @@ export class SageCore {
 
     // 为 FallbackAgentProvider 注入历史查询能力
     if (agent instanceof FallbackAgentProvider) {
-      agent.setRecentHistoryFn((threadKey, maxTurns) =>
-        this.historyStore.getRecentConversation(threadKey, maxTurns)
+      agent.setRecentHistoryFn((conversationId, maxTurns) =>
+        this.historyStore.getRecentConversation(conversationId, maxTurns)
       );
     }
 
     // 注入 DB 去重（重启后兜底）
     this.feishuService.setDedupFn((eventId) => this.historyStore.isDuplicateEvent(eventId));
 
-    // 回复后飞书创建 thread 时，迁移 session 映射 + activeCards threadKey
-    // 注意：此回调在 replyCard() 返回之前就触发了（飞书发 card → 创建 thread → 回调），
-    // 所以 activeCards 可能还没有对应的 card，用 pendingCardMigrations 暂存
+    // 回复后飞书创建 thread 时，给 conversation 补上 thread_id。
+    // message_id 和 thread_id 是飞书的两个外部标识，内部状态只挂 conversationId。
     this.feishuService.setThreadCreatedHandler((messageId, threadId) => {
-      const msgKey = `msg:${messageId}`;
-      this.historyStore.migrateSessionId(msgKey, threadId);
+      const conversationId =
+        this.messageConversations.get(messageId)
+        ?? this.historyStore.getSessionByFirstMessageId(messageId)?.id
+        ?? this.historyStore.getSessionByThreadId(threadId)?.id;
 
-      // 优先更新已存在的 card
-      let migrated = false;
-      for (const [cardMsgId, card] of this.activeCards) {
-        if (card.threadKey === msgKey) {
-          card.threadKey = threadId;
-          this.logger.info(`activeCard threadKey 迁移（已存在）: ${msgKey} -> ${threadId} (card: ${cardMsgId})`);
-          migrated = true;
-          break;
-        }
+      if (!conversationId) {
+        this.logger.warn(`收到 thread_id 但未找到 conversation: messageId=${messageId}, threadId=${threadId}`);
+        return;
       }
 
-      // 如果 activeCards 还没有（回调先于 activeCards.set() 触发），暂存等待后续处理
-      if (!migrated) {
-        // pendingMigrations 只用 msgKey 作为 lookup key，cardMsgId 字段仅用于日志
-        this.pendingCardMigrations.set(msgKey, { cardMsgId: messageId, threadId });
-        this.logger.info(`activeCard threadKey 迁移（暂存）: ${msgKey} -> ${threadId} (等待 card 注册)`);
+      const existing = this.historyStore.getSessionByThreadId(threadId);
+      if (existing && existing.id !== conversationId) {
+        this.logger.warn(`thread_id 已绑定到其他 conversation: threadId=${threadId}, existing=${existing.id}, current=${conversationId}`);
+        return;
       }
 
-      // 记录迁移映射（供消费队列时追踪）
-      this.threadKeyMigrations.set(msgKey, threadId);
-
-      // 同步迁移消息排队相关的数据结构
-      if (this.processingThreads.has(msgKey)) {
-        this.processingThreads.delete(msgKey);
-        this.processingThreads.add(threadId);
-        this.logger.info(`processingThreads 迁移: ${msgKey} -> ${threadId}`);
-      }
-      if (this.pendingMessages.has(msgKey)) {
-        const queue = this.pendingMessages.get(msgKey)!;
-        this.pendingMessages.delete(msgKey);
-        this.pendingMessages.set(threadId, queue);
-        this.logger.info(`pendingMessages 迁移: ${msgKey} -> ${threadId}`);
-      }
-
-      this.logger.info(`迁移 thread 会话: ${msgKey} -> ${threadId}`);
+      this.historyStore.setConversationThreadId(conversationId, threadId);
+      this.messageConversations.set(messageId, conversationId);
+      this.threadConversations.set(threadId, conversationId);
+      this.logger.info(`conversation 绑定 thread_id: conversation=${conversationId}, parentMessage=${messageId}, threadId=${threadId}`);
     });
   }
 
@@ -124,40 +104,35 @@ export class SageCore {
       return;
     }
 
-    const threadKey = this.resolveThreadKey(ctx);
+    const conversationId = this.getOrCreateConversation(ctx);
 
-    // 如果该 thread 正在处理中，排队等待
-    // 需要同时检查原始 key 和可能已迁移的 key（activeCards 的 threadKey 在 thread 创建回调中被更新）
-    const queueKey = this.findProcessingKey(threadKey);
-    if (queueKey) {
-      const queue = this.pendingMessages.get(queueKey) || [];
+    // 如果该 conversation 正在处理中，排队等待
+    if (this.processingConversations.has(conversationId)) {
+      const queue = this.pendingMessages.get(conversationId) || [];
       queue.push(ctx);
-      this.pendingMessages.set(queueKey, queue);
-      this.logger.info(`消息排队: threadKey=${threadKey}, queueKey=${queueKey}, 队列长度=${queue.length}, text="${ctx.text.slice(0, 50)}"`);
+      this.pendingMessages.set(conversationId, queue);
+      this.rememberMessageConversation(ctx.messageId, conversationId);
+      this.logger.info(`消息排队: conversation=${conversationId}, 队列长度=${queue.length}, text="${ctx.text.slice(0, 50)}"`);
       return; // 不阻塞，当前处理完后会自动消费队列
     }
 
-    // 标记开始处理（threadKey 可能在处理中被迁移，用 currentKey 追踪）
-    this.processingThreads.add(threadKey);
-    let currentKey = threadKey;
+    // 标记开始处理。内部状态只使用稳定的 conversationId。
+    this.processingConversations.add(conversationId);
 
     try {
-      await this.processThreadMessage(ctx, threadKey);
+      await this.processThreadMessage(ctx, conversationId);
 
       // 处理完后消费队列中的排队消息
-      // 注意：threadKey 可能已被迁移（msg:xxx -> omt_xxx），需要查当前有效 key
-      currentKey = this.processingThreads.has(threadKey) ? threadKey : this.findMigratedKey(threadKey);
-
       while (true) {
-        const queue = this.pendingMessages.get(currentKey);
+        const queue = this.pendingMessages.get(conversationId);
         if (!queue || queue.length === 0) {
-          this.pendingMessages.delete(currentKey);
+          this.pendingMessages.delete(conversationId);
           break;
         }
 
         // 取出所有排队消息，合并成一条
         const queuedMessages = queue.splice(0);
-        this.pendingMessages.delete(currentKey);
+        this.pendingMessages.delete(conversationId);
 
         const mergedText = queuedMessages.map(m => this.preprocessMessage(m.text)).join('\n');
         const lastCtx = queuedMessages[queuedMessages.length - 1]; // 用最后一条消息的 ctx 回复
@@ -165,31 +140,28 @@ export class SageCore {
           ? `[用户在你处理上一条消息期间追加了1条新消息]\n\n`
           : `[用户在你处理上一条消息期间追加了${queuedMessages.length}条新消息]\n\n`;
 
-        this.logger.info(`消费排队消息: currentKey=${currentKey}, 合并${queuedMessages.length}条`);
+        this.logger.info(`消费排队消息: conversation=${conversationId}, 合并${queuedMessages.length}条`);
 
         // 构造合并后的 ctx 用于处理
         const mergedCtx: MessageContext = { ...lastCtx, text: hint + mergedText };
-        await this.processThreadMessage(mergedCtx, currentKey);
+        await this.processThreadMessage(mergedCtx, conversationId);
       }
     } finally {
-      this.processingThreads.delete(currentKey);
-      // 兜底：如果迁移发生了，原始 key 也清理
-      if (currentKey !== threadKey) this.processingThreads.delete(threadKey);
-      // 清理迁移映射
-      this.threadKeyMigrations.delete(threadKey);
+      this.processingConversations.delete(conversationId);
     }
   }
 
   // 实际处理单条（或合并后的）消息
-  private async processThreadMessage(ctx: MessageContext, threadKey: string): Promise<void> {
+  private async processThreadMessage(ctx: MessageContext, conversationId: string): Promise<void> {
     try {
-      this.logger.info(`处理消息: openId=${ctx.openId}, threadId=${ctx.threadId || '无'}, text="${ctx.text.slice(0, 100)}"`);
+      this.rememberMessageConversation(ctx.messageId, conversationId);
+      this.logger.info(`处理消息: conversation=${conversationId}, openId=${ctx.openId}, threadId=${ctx.threadId || '无'}, text="${ctx.text.slice(0, 100)}"`);
 
       // 预处理消息
       let processedMessage = this.preprocessMessage(ctx.text);
 
       // 获取或创建 Thread 对应的会话
-      const { sessionId, isNew } = await this.getOrCreateThreadSession(threadKey, ctx);
+      const { sessionId, isNew } = await this.getOrCreateAgentSession(conversationId);
 
       // 仅在新会话首条消息时注入主动消息上下文（避免 thread 内每条消息都重复注入）
       if (isNew && ctx.rootId) {
@@ -200,13 +172,13 @@ export class SageCore {
         }
       }
 
-      // 注册 session → thread 映射（供 FallbackAgentProvider 反查 threadKey）
+      // 注册 agent session → conversation 映射（供 FallbackAgentProvider 注入历史上下文）
       if (this.agent instanceof FallbackAgentProvider) {
-        this.agent.registerSessionThread(sessionId, threadKey);
+        this.agent.registerSessionConversation(sessionId, conversationId);
       }
 
       // 记录用户消息
-      this.historyStore.saveUserMessage(threadKey, this.agent.name, processedMessage, {
+      this.historyStore.saveUserMessage(conversationId, this.agent.name, processedMessage, {
         openId: ctx.openId,
         chatId: ctx.chatId,
         chatType: ctx.chatType,
@@ -215,7 +187,7 @@ export class SageCore {
 
       await this.runAgentToCard({
         prompt: processedMessage,
-        threadKey,
+        conversationId,
         sessionId,
         anchor: { kind: 'reply', parentMessageId: ctx.messageId },
       });
@@ -238,24 +210,25 @@ export class SageCore {
    * 跑 agent 并渲染成流式卡片。通用能力，既服务于用户消息回复，
    * 也服务于调度器主动触发的 agent 任务。
    *
-   * 调用方负责：resolve threadKey、创建/恢复 session、保存用户消息（如适用）。
+   * 调用方负责：resolve conversationId、创建/恢复 session、保存用户消息（如适用）。
    * 本方法负责：发初始卡片 → 流式消费 agent → 节流 PATCH → 超限拆卡
    *          → 最终卡片 → 持久化 session/resume_id/events → activeCards 清理。
    */
   private async runAgentToCard(opts: {
     prompt: string;
-    threadKey: string;
+    conversationId: string;
     sessionId: string;
     anchor:
       | { kind: 'reply'; parentMessageId: string }
       | { kind: 'proactive'; openId: string };
   }): Promise<{ replyMessageId: string } | null> {
-    const { prompt, threadKey, sessionId, anchor } = opts;
+    const { prompt, conversationId, sessionId, anchor } = opts;
 
     // Step 1: 发送初始 "thinking" 卡片
     const initialCard = this.feishuService.buildStreamingCard([], true);
     let replyMessageId = '';
     if (anchor.kind === 'reply') {
+      this.rememberMessageConversation(anchor.parentMessageId, conversationId);
       const r = await this.feishuService.replyCard(anchor.parentMessageId, initialCard);
       replyMessageId = r.messageId;
     } else {
@@ -269,13 +242,8 @@ export class SageCore {
 
     // 追踪活跃卡片（含 abort 控制器）
     const abortController = new AbortController();
-    const pendingMigration = this.pendingCardMigrations.get(threadKey);
-    let resolvedThreadKey = pendingMigration ? pendingMigration.threadId : threadKey;
-    if (pendingMigration) {
-      this.pendingCardMigrations.delete(threadKey);
-      this.logger.info(`activeCard threadKey 迁移（应用暂存）: ${threadKey} -> ${resolvedThreadKey} (card: ${replyMessageId})`);
-    }
-    this.activeCards.set(replyMessageId, { threadKey: resolvedThreadKey, startTime: Date.now(), abortController });
+    this.rememberMessageConversation(replyMessageId, conversationId);
+    this.activeCards.set(replyMessageId, { conversationId, startTime: Date.now(), abortController });
 
     // Step 2: 流式处理 agent 消息（含卡片大小保护）
     const allEvents: AgentEvent[] = [];
@@ -297,7 +265,7 @@ export class SageCore {
         const iterResult = await Promise.race([stream.next(), abortPromise]);
         if (iterResult.done) {
           if (abortController.signal.aborted) {
-            this.logger.info(`任务被用户中断: ${resolvedThreadKey}`);
+            this.logger.info(`任务被用户中断: ${conversationId}`);
             resultText = '⏹ 任务已被用户中断。';
             stream.return?.(undefined as any).catch(() => {});
           }
@@ -339,7 +307,8 @@ export class SageCore {
               const { messageId: newMsgId } = await this.feishuService.replyCard(currentReplyMessageId, newCard);
               if (newMsgId) {
                 currentReplyMessageId = newMsgId;
-                this.activeCards.set(currentReplyMessageId, { threadKey: resolvedThreadKey, startTime: Date.now(), abortController });
+                this.rememberMessageConversation(currentReplyMessageId, conversationId);
+                this.activeCards.set(currentReplyMessageId, { conversationId, startTime: Date.now(), abortController });
               }
               this.logger.info(`steps 超限 (${stepsSize}B)，已开新卡: ${currentReplyMessageId}`);
             } else {
@@ -351,7 +320,8 @@ export class SageCore {
                 const { messageId: newMsgId } = await this.feishuService.replyCard(currentReplyMessageId, newCard);
                 if (newMsgId) {
                   currentReplyMessageId = newMsgId;
-                  this.activeCards.set(currentReplyMessageId, { threadKey: resolvedThreadKey, startTime: Date.now(), abortController });
+                  this.rememberMessageConversation(currentReplyMessageId, conversationId);
+                  this.activeCards.set(currentReplyMessageId, { conversationId, startTime: Date.now(), abortController });
                 }
                 this.logger.warn(`流式 PATCH 失败，已开新卡: ${currentReplyMessageId}`);
               }
@@ -369,19 +339,19 @@ export class SageCore {
     try {
       // Step 3: 处理 fallback session 迁移
       if (newSessionId) {
-        this.historyStore.updateAgentSessionId(resolvedThreadKey, newSessionId);
+        this.historyStore.updateAgentSessionId(conversationId, newSessionId);
         this.restoredSessions.add(newSessionId);
-        this.logger.info(`Fallback 更新会话: ${resolvedThreadKey} -> ${newSessionId}`);
+        this.logger.info(`Fallback 更新会话: ${conversationId} -> ${newSessionId}`);
       }
 
       const effectiveSessionId = newSessionId ?? sessionId;
       const resumeId = this.agent.getResumeId(effectiveSessionId);
       if (resumeId) {
-        this.historyStore.updateResumeId(resolvedThreadKey, resumeId);
+        this.historyStore.updateResumeId(conversationId, resumeId);
       }
 
       // 记录 agent 事件
-      this.historyStore.saveAgentEvents(resolvedThreadKey, this.agent.name, allEvents);
+      this.historyStore.saveAgentEvents(conversationId, this.agent.name, allEvents);
 
       // Step 4: 最终卡片更新
       let finalText = resultText;
@@ -437,7 +407,7 @@ export class SageCore {
         const effectiveSessionId = newSessionId ?? sessionId;
         const resumeId = this.agent.getResumeId(effectiveSessionId);
         if (resumeId) {
-          this.historyStore.updateResumeId(resolvedThreadKey, resumeId);
+          this.historyStore.updateResumeId(conversationId, resumeId);
         }
       } catch (err) {
         this.logger.warn('持久化 resume_id 失败:', err);
@@ -469,12 +439,13 @@ export class SageCore {
   }
 
   private cmdThreadId(ctx: MessageContext): string {
-    const threadKey = this.resolveThreadKey(ctx);
-    const session = this.historyStore.getSession(threadKey);
+    const conversationId = this.findConversation(ctx);
+    const session = conversationId ? this.historyStore.getSession(conversationId) : null;
 
     if (ctx.threadId) {
       const info = [
         `Thread ID: ${ctx.threadId}`,
+        `Conversation ID: ${conversationId || '未创建'}`,
         `Agent Provider: ${this.agent.name}`,
         `Session: ${session?.agent_session_id || '未创建'}`,
         `创建者: ${session?.open_id || 'N/A'}`,
@@ -487,16 +458,16 @@ export class SageCore {
   }
 
   private cmdClear(ctx: MessageContext): string {
-    const threadKey = this.resolveThreadKey(ctx);
-    const session = this.historyStore.getSession(threadKey);
+    const conversationId = this.findConversation(ctx);
+    const session = conversationId ? this.historyStore.getSession(conversationId) : null;
 
     if (session?.agent_session_id) {
       this.agent.deleteSession(session.agent_session_id).catch(err => {
         this.logger.error('删除 Agent 会话失败:', err);
       });
-      this.historyStore.clearSessionAgent(threadKey);
+      this.historyStore.clearSessionAgent(session.id);
       this.restoredSessions.delete(session.agent_session_id);
-      this.logger.info(`清除 thread 会话: ${threadKey}`);
+      this.logger.info(`清除 conversation 会话: ${session.id}`);
       return '已清空当前话题的上下文。下一条消息将开启新的对话。';
     }
 
@@ -504,15 +475,16 @@ export class SageCore {
   }
 
   private cmdStop(ctx: MessageContext): string {
-    const threadKey = this.resolveThreadKey(ctx);
+    const conversationId = this.findConversation(ctx);
+    if (!conversationId) return '当前话题没有正在执行的任务。';
 
-    // 在 activeCards 中找到该 thread 的活跃任务
+    // 在 activeCards 中找到该 conversation 的活跃任务
     let aborted = false;
     for (const [msgId, card] of this.activeCards) {
-      if (card.threadKey === threadKey) {
+      if (card.conversationId === conversationId) {
         card.abortController.abort();
         aborted = true;
-        this.logger.info(`用户中断任务: threadKey=${threadKey}, cardMsgId=${msgId}`);
+        this.logger.info(`用户中断任务: conversation=${conversationId}, cardMsgId=${msgId}`);
       }
     }
 
@@ -673,59 +645,99 @@ export class SageCore {
 
   // ─── 会话管理 ───
 
-  private resolveThreadKey(ctx: MessageContext): string {
-    return ctx.threadId || `msg:${ctx.messageId}`;
+  private rememberMessageConversation(messageId: string | undefined, conversationId: string): void {
+    if (messageId) this.messageConversations.set(messageId, conversationId);
   }
 
-  /**
-   * 查找 threadKey 对应的正在处理中的 key。
-   * 迁移后 processingThreads 里已经是 omt_xxx，直接匹配即可。
-   * 返回 null 表示没有正在处理。
-   */
-  private findProcessingKey(threadKey: string): string | null {
-    if (this.processingThreads.has(threadKey)) return threadKey;
-    return null;
+  private rememberThreadConversation(threadId: string | undefined, conversationId: string): void {
+    if (threadId) this.threadConversations.set(threadId, conversationId);
   }
 
-  /**
-   * 查找原始 threadKey 迁移后的 key。
-   * threadCreatedHandler 中 msg:xxx → omt_xxx 迁移会记录到 threadKeyMigrations。
-   */
-  private findMigratedKey(originalKey: string): string {
-    if (this.processingThreads.has(originalKey)) return originalKey;
-    const migrated = this.threadKeyMigrations.get(originalKey);
-    if (migrated) return migrated;
-    return originalKey;
+  private getOrCreateConversation(ctx: MessageContext): string {
+    if (ctx.threadId) {
+      const cached = this.threadConversations.get(ctx.threadId);
+      if (cached) {
+        this.rememberMessageConversation(ctx.messageId, cached);
+        return cached;
+      }
+
+      const existing = this.historyStore.getSessionByThreadId(ctx.threadId);
+      if (existing) {
+        this.rememberThreadConversation(ctx.threadId, existing.id);
+        this.rememberMessageConversation(ctx.messageId, existing.id);
+        return existing.id;
+      }
+    }
+
+    const cachedByMessage = this.messageConversations.get(ctx.messageId);
+    if (cachedByMessage) return cachedByMessage;
+
+    const existingByMessage = this.historyStore.getSessionByFirstMessageId(ctx.messageId);
+    if (existingByMessage) {
+      this.rememberMessageConversation(ctx.messageId, existingByMessage.id);
+      this.rememberThreadConversation(ctx.threadId ?? existingByMessage.thread_id ?? undefined, existingByMessage.id);
+      return existingByMessage.id;
+    }
+
+    const conversationId = this.historyStore.createConversation(this.agent.name, {
+      firstMessageId: ctx.threadId ? ctx.rootId ?? ctx.messageId : ctx.messageId,
+      threadId: ctx.threadId,
+      openId: ctx.openId,
+      chatId: ctx.chatId,
+      chatType: ctx.chatType,
+    });
+
+    this.rememberMessageConversation(ctx.messageId, conversationId);
+    this.rememberThreadConversation(ctx.threadId, conversationId);
+    this.logger.info(`创建 conversation: id=${conversationId}, firstMessage=${ctx.threadId ? ctx.rootId ?? ctx.messageId : ctx.messageId}, threadId=${ctx.threadId || '无'}`);
+    return conversationId;
   }
 
-  private async getOrCreateThreadSession(threadKey: string, ctx: MessageContext): Promise<{ sessionId: string; isNew: boolean }> {
-    const row = this.historyStore.getSession(threadKey);
+  private findConversation(ctx: MessageContext): string | null {
+    if (ctx.threadId) {
+      const cached = this.threadConversations.get(ctx.threadId);
+      if (cached) return cached;
+      const byThread = this.historyStore.getSessionByThreadId(ctx.threadId);
+      if (byThread) {
+        this.rememberThreadConversation(ctx.threadId, byThread.id);
+        return byThread.id;
+      }
+    }
+
+    const cached = this.messageConversations.get(ctx.messageId);
+    if (cached) return cached;
+    return this.historyStore.getSessionByFirstMessageId(ctx.messageId)?.id ?? null;
+  }
+
+  private async getOrCreateAgentSession(conversationId: string): Promise<{ sessionId: string; isNew: boolean }> {
+    const row = this.historyStore.getSession(conversationId);
 
     if (row?.agent_session_id) {
       if (!this.restoredSessions.has(row.agent_session_id)) {
         try {
           await this.agent.restoreSession(row.agent_session_id, row.resume_id || undefined);
           this.restoredSessions.add(row.agent_session_id);
-          this.logger.info(`懒恢复会话: ${threadKey} -> ${row.agent_session_id}`);
+          this.logger.info(`懒恢复会话: ${conversationId} -> ${row.agent_session_id}`);
         } catch (err) {
           this.logger.warn(`恢复会话失败，将创建新会话: ${row.agent_session_id}`, err);
-          const sessionId = await this.createNewSession(threadKey, ctx);
+          const sessionId = await this.createNewAgentSession(conversationId);
           return { sessionId, isNew: true };
         }
       } else {
-        this.logger.info(`复用 thread 会话: ${threadKey} -> ${row.agent_session_id}`);
+        this.logger.info(`复用 conversation 会话: ${conversationId} -> ${row.agent_session_id}`);
       }
       return { sessionId: row.agent_session_id, isNew: false };
     }
 
-    const sessionId = await this.createNewSession(threadKey, ctx);
+    const sessionId = await this.createNewAgentSession(conversationId);
     return { sessionId, isNew: true };
   }
 
-  private async createNewSession(threadKey: string, ctx: MessageContext): Promise<string> {
+  private async createNewAgentSession(conversationId: string): Promise<string> {
     const session = await this.agent.createSession();
     this.restoredSessions.add(session.id);
-    this.logger.info(`创建新 thread 会话: ${threadKey} -> ${session.id} (provider: ${this.agent.name})`);
+    this.historyStore.updateAgentSessionId(conversationId, session.id);
+    this.logger.info(`创建新 agent 会话: ${conversationId} -> ${session.id} (provider: ${this.agent.name})`);
     return session.id;
   }
 
@@ -918,9 +930,14 @@ export class SageCore {
     const session = await this.agent.createSession();
     this.restoredSessions.add(session.id);
 
-    // 先用临时 threadKey 占位，Step1 拿到 replyMessageId 后迁移
-    const tmpThreadKey = `proactive:${session.id}`;
-    this.historyStore.saveUserMessage(tmpThreadKey, this.agent.name, prompt, {
+    const conversationId = this.historyStore.createConversation(this.agent.name, {
+      openId,
+      chatId: '',
+      chatType: 'p2p',
+      agentSessionId: session.id,
+    });
+
+    this.historyStore.saveUserMessage(conversationId, this.agent.name, prompt, {
       openId,
       chatId: '',
       chatType: 'p2p',
@@ -929,16 +946,13 @@ export class SageCore {
 
     const result = await this.runAgentToCard({
       prompt,
-      threadKey: tmpThreadKey,
+      conversationId,
       sessionId: session.id,
       anchor: { kind: 'proactive', openId },
     });
 
-    // 迁移 threadKey 到 msg:${replyMessageId}，方便后续用户在该卡片上回复时定位
-    // 同时写入 proactive_messages 表，用户回复时可注入 prompt 作为上下文
     if (result?.replyMessageId) {
-      const finalThreadKey = `msg:${result.replyMessageId}`;
-      this.historyStore.migrateSessionId(tmpThreadKey, finalThreadKey);
+      this.rememberMessageConversation(result.replyMessageId, conversationId);
       this.historyStore.saveProactiveMessage(result.replyMessageId, `[定时任务] ${prompt}`, openId);
       this.logger.info(`主动 agent 任务已发送: messageId=${result.replyMessageId}, session=${session.id}`);
     }

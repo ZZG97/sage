@@ -3,6 +3,7 @@ import { Database } from 'bun:sqlite';
 import { Logger } from '../utils';
 import type { AgentEvent } from '../agent/types';
 import { join, resolve } from 'path';
+import { randomUUID } from 'crypto';
 
 // 默认 db 路径: {项目根}/data/history.db
 const DEFAULT_DB_PATH = resolve(import.meta.dir, '../../data/history.db');
@@ -24,6 +25,19 @@ export interface SessionWithEvents {
     tool_name: string | null;
     ts: string;
   }>;
+}
+
+export interface ConversationSession {
+  id: string;
+  first_message_id: string | null;
+  thread_id: string | null;
+  agent_session_id: string | null;
+  resume_id: string | null;
+  provider: string;
+  open_id: string | null;
+  chat_id: string | null;
+  chat_type: string | null;
+  last_active_at: string;
 }
 
 /** 从 IANA 时区名计算 SQLite 用的 UTC 偏移修饰符，如 '${this.tzModifier}'、'-5 hours' */
@@ -102,7 +116,7 @@ export class HistoryStore {
       );
     `);
 
-    // Migration: 新增 thread_key 和 resume_id 列
+    // Migration: add columns and normalize legacy external ids.
     this.migrateAddColumns();
   }
 
@@ -119,9 +133,319 @@ export class HistoryStore {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN resume_id TEXT`);
       this.logger.info('Migration: 添加 resume_id 列');
     }
+    if (!colNames.has('first_message_id')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN first_message_id TEXT`);
+      this.logger.info('Migration: 添加 first_message_id 列');
+    }
+    if (!colNames.has('thread_id')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN thread_id TEXT`);
+      this.logger.info('Migration: 添加 thread_id 列');
+    }
+
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_first_message
+      ON sessions(env, first_message_id)
+      WHERE first_message_id IS NOT NULL;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_thread
+      ON sessions(env, thread_id)
+      WHERE thread_id IS NOT NULL;
+    `);
+
+    if (process.env.RUN_HISTORY_DATA_MIGRATIONS === '1') {
+      this.backfillLegacyExternalIds();
+      this.migrateLegacySessionIds();
+      this.migrateOrphanLegacyEvents();
+    } else {
+      this.logPendingHistoryDataMigrations();
+    }
   }
 
-  /** 确保 session 存在，不存在则创建。sessionId 此处即 threadKey（DB 主键） */
+  private newConversationId(): string {
+    return `conv_${randomUUID()}`;
+  }
+
+  private backfillLegacyExternalIds(): void {
+    // Explicit data migration only. Do not call this during normal startup.
+    // If a conv_* row already owns the same external id, leave the legacy row
+    // unset; migrateLegacySessionIds() will merge it into the existing conv_*.
+    this.db.exec(`
+      UPDATE sessions AS legacy
+      SET thread_id = id
+      WHERE thread_id IS NULL
+        AND id LIKE 'omt_%'
+        AND NOT EXISTS (
+          SELECT 1 FROM sessions AS existing
+          WHERE existing.env = legacy.env
+            AND existing.thread_id = legacy.id
+            AND existing.id != legacy.id
+        );
+
+      UPDATE sessions AS legacy
+      SET first_message_id = substr(id, 5)
+      WHERE first_message_id IS NULL
+        AND id LIKE 'msg:%'
+        AND NOT EXISTS (
+          SELECT 1 FROM sessions AS existing
+          WHERE existing.env = legacy.env
+            AND existing.first_message_id = substr(legacy.id, 5)
+            AND existing.id != legacy.id
+        );
+    `);
+  }
+
+  private logPendingHistoryDataMigrations(): void {
+    const legacySessions = this.db.query(
+      `SELECT COUNT(*) AS count FROM sessions WHERE id NOT LIKE 'conv_%'`
+    ).get() as { count: number } | null;
+    const legacyEvents = this.db.query(
+      `SELECT COUNT(*) AS count FROM events WHERE session_id NOT LIKE 'conv_%'`
+    ).get() as { count: number } | null;
+    const orphanEvents = this.db.query(`
+      SELECT COUNT(*) AS count
+      FROM events e
+      LEFT JOIN sessions s ON s.id = e.session_id
+      WHERE s.id IS NULL
+    `).get() as { count: number } | null;
+
+    const pending =
+      (legacySessions?.count ?? 0) +
+      (legacyEvents?.count ?? 0) +
+      (orphanEvents?.count ?? 0);
+    if (pending > 0) {
+      this.logger.warn(
+        `跳过历史数据迁移: legacySessions=${legacySessions?.count ?? 0}, legacyEvents=${legacyEvents?.count ?? 0}, orphanEvents=${orphanEvents?.count ?? 0}. ` +
+        `如需显式迁移，设置 RUN_HISTORY_DATA_MIGRATIONS=1 后单独执行。`
+      );
+    }
+  }
+
+  private migrateLegacySessionIds(): void {
+    const legacyRows = this.db.query(
+      `SELECT id, env, provider, open_id, chat_id, chat_type,
+              first_message_id, thread_id, agent_session_id, resume_id,
+              started_at, last_active_at
+       FROM sessions
+       WHERE id NOT LIKE 'conv_%'`
+    ).all() as Array<{
+      id: string;
+      env: string;
+      provider: string;
+      open_id: string | null;
+      chat_id: string | null;
+      chat_type: string | null;
+      first_message_id: string | null;
+      thread_id: string | null;
+      agent_session_id: string | null;
+      resume_id: string | null;
+      started_at: string;
+      last_active_at: string;
+    }>;
+
+    if (legacyRows.length === 0) return;
+
+    const previousForeignKeys = this.db.query(
+      `PRAGMA foreign_keys`
+    ).get() as { foreign_keys: number } | null;
+
+    const findByFirstMessage = this.db.prepare(
+      `SELECT id, agent_session_id, resume_id
+       FROM sessions
+       WHERE env = ? AND first_message_id = ? AND id != ?
+       ORDER BY last_active_at DESC LIMIT 1`
+    );
+    const findByThread = this.db.prepare(
+      `SELECT id, agent_session_id, resume_id
+       FROM sessions
+       WHERE env = ? AND thread_id = ? AND id != ?
+       ORDER BY last_active_at DESC LIMIT 1`
+    );
+    const updateSession = this.db.prepare(`
+      UPDATE sessions
+      SET id = ?,
+          first_message_id = COALESCE(first_message_id, ?),
+          thread_id = COALESCE(thread_id, ?)
+      WHERE id = ?
+    `);
+    const maxPosition = this.db.prepare(
+      `SELECT COALESCE(MAX(position), -1) AS maxPosition FROM events WHERE session_id = ?`
+    );
+    const moveEvents = this.db.prepare(
+      `UPDATE events SET session_id = ?, position = position + ? WHERE session_id = ?`
+    );
+    const updateMergedSession = this.db.prepare(`
+      UPDATE sessions
+      SET open_id = COALESCE(open_id, ?),
+          chat_id = COALESCE(chat_id, ?),
+          chat_type = COALESCE(chat_type, ?),
+          agent_session_id = COALESCE(agent_session_id, ?),
+          resume_id = COALESCE(resume_id, ?),
+          last_active_at = CASE WHEN last_active_at > ? THEN last_active_at ELSE ? END
+      WHERE id = ?
+    `);
+    const deleteSession = this.db.prepare(`DELETE FROM sessions WHERE id = ?`);
+
+    let mergedCount = 0;
+    let renamedCount = 0;
+
+    const migrateRows = this.db.transaction((rows: typeof legacyRows) => {
+      for (const row of rows) {
+        const firstMessageId = row.first_message_id ?? (row.id.startsWith('msg:') ? row.id.slice(4) : null);
+        const threadId = row.thread_id ?? (row.id.startsWith('omt_') ? row.id : null);
+        const existing = firstMessageId
+          ? findByFirstMessage.get(row.env, firstMessageId, row.id) as { id: string; agent_session_id: string | null; resume_id: string | null } | null
+          : threadId
+            ? findByThread.get(row.env, threadId, row.id) as { id: string; agent_session_id: string | null; resume_id: string | null } | null
+            : null;
+
+        if (existing) {
+          const pos = maxPosition.get(existing.id) as { maxPosition: number } | null;
+          moveEvents.run(existing.id, (pos?.maxPosition ?? -1) + 1, row.id);
+          updateMergedSession.run(
+            row.open_id,
+            row.chat_id,
+            row.chat_type,
+            row.agent_session_id,
+            row.resume_id,
+            row.last_active_at,
+            row.last_active_at,
+            existing.id,
+          );
+          deleteSession.run(row.id);
+          mergedCount++;
+          continue;
+        }
+
+        updateSession.run(this.newConversationId(), firstMessageId, threadId, row.id);
+        renamedCount++;
+      }
+    });
+
+    this.db.exec(`PRAGMA foreign_keys = OFF`);
+    try {
+      migrateRows(legacyRows);
+    } finally {
+      if (previousForeignKeys?.foreign_keys) {
+        this.db.exec(`PRAGMA foreign_keys = ON`);
+      }
+    }
+
+    this.logger.info(`Migration: legacy session id 转 conversationId: renamed=${renamedCount}, merged=${mergedCount}`);
+  }
+
+  private migrateOrphanLegacyEvents(): void {
+    const orphanRows = this.db.query(`
+      SELECT
+        e.session_id AS oldId,
+        (SELECT provider FROM events e2 WHERE e2.session_id = e.session_id ORDER BY position LIMIT 1) AS provider,
+        MIN(e.ts) AS startedAt,
+        MAX(e.ts) AS lastActiveAt
+      FROM events e
+      LEFT JOIN sessions s ON s.id = e.session_id
+      WHERE s.id IS NULL AND e.session_id NOT LIKE 'conv_%'
+      GROUP BY e.session_id
+    `).all() as Array<{
+      oldId: string;
+      provider: string | null;
+      startedAt: string | null;
+      lastActiveAt: string | null;
+    }>;
+
+    if (orphanRows.length === 0) return;
+
+    const previousForeignKeys = this.db.query(
+      `PRAGMA foreign_keys`
+    ).get() as { foreign_keys: number } | null;
+
+    const findByFirstMessage = this.db.prepare(
+      `SELECT id FROM sessions WHERE first_message_id = ? ORDER BY last_active_at DESC LIMIT 1`
+    );
+    const findByThread = this.db.prepare(
+      `SELECT id FROM sessions WHERE thread_id = ? ORDER BY last_active_at DESC LIMIT 1`
+    );
+    const insertSession = this.db.prepare(`
+      INSERT INTO sessions (
+        id, env, provider, first_message_id, thread_id, started_at, last_active_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const updateEvents = this.db.prepare(`UPDATE events SET session_id = ? WHERE session_id = ?`);
+
+    const migrateRows = this.db.transaction((rows: typeof orphanRows) => {
+      for (const row of rows) {
+        const firstMessageId = row.oldId.startsWith('msg:') ? row.oldId.slice(4) : null;
+        const threadId = row.oldId.startsWith('omt_') ? row.oldId : null;
+
+        const existing = firstMessageId
+          ? findByFirstMessage.get(firstMessageId) as { id: string } | null
+          : threadId
+            ? findByThread.get(threadId) as { id: string } | null
+            : null;
+
+        let conversationId = existing?.id;
+        if (!conversationId) {
+          conversationId = this.newConversationId();
+          const startedAt = row.startedAt ?? new Date().toISOString();
+          const lastActiveAt = row.lastActiveAt ?? startedAt;
+          insertSession.run(
+            conversationId,
+            this.env,
+            row.provider ?? 'unknown',
+            firstMessageId,
+            threadId,
+            startedAt,
+            lastActiveAt,
+          );
+        }
+
+        updateEvents.run(conversationId, row.oldId);
+      }
+    });
+
+    this.db.exec(`PRAGMA foreign_keys = OFF`);
+    try {
+      migrateRows(orphanRows);
+    } finally {
+      if (previousForeignKeys?.foreign_keys) {
+        this.db.exec(`PRAGMA foreign_keys = ON`);
+      }
+    }
+
+    this.logger.info(`Migration: orphan legacy events 归并到 conversationId: ${orphanRows.length} 组`);
+  }
+
+  /** 创建一条 Sage 内部 conversation。message/thread 是外部字段，不作为主键。 */
+  createConversation(provider: string, ctx?: {
+    firstMessageId?: string;
+    threadId?: string;
+    openId?: string;
+    chatId?: string;
+    chatType?: string;
+    agentSessionId?: string;
+  }): string {
+    const now = new Date().toISOString();
+    const id = this.newConversationId();
+    this.db.run(
+      `INSERT INTO sessions (
+         id, env, provider, open_id, chat_id, chat_type,
+         first_message_id, thread_id, agent_session_id,
+         started_at, last_active_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id, this.env, provider,
+        ctx?.openId ?? null,
+        ctx?.chatId ?? null,
+        ctx?.chatType ?? null,
+        ctx?.firstMessageId ?? null,
+        ctx?.threadId ?? null,
+        ctx?.agentSessionId ?? null,
+        now, now,
+      ],
+    );
+    return id;
+  }
+
+  /** 确保 conversation 存在，不存在则按给定 id 创建。仅兼容旧调用路径。 */
   ensureSession(sessionId: string, provider: string, ctx?: { openId?: string; chatId?: string; chatType?: string; agentSessionId?: string }): void {
     const now = new Date().toISOString();
     this.db.run(
@@ -130,6 +454,14 @@ export class HistoryStore {
        ON CONFLICT(id) DO UPDATE SET last_active_at = ?,
          agent_session_id = COALESCE(excluded.agent_session_id, sessions.agent_session_id)`,
       [sessionId, this.env, provider, ctx?.openId ?? null, ctx?.chatId ?? null, ctx?.chatType ?? null, ctx?.agentSessionId ?? null, now, now, now]
+    );
+  }
+
+  /** 给 conversation 补充/更新飞书 thread_id。 */
+  setConversationThreadId(conversationId: string, threadId: string): void {
+    this.db.run(
+      `UPDATE sessions SET thread_id = ?, last_active_at = ? WHERE id = ? AND env = ?`,
+      [threadId, new Date().toISOString(), conversationId, this.env],
     );
   }
 
@@ -196,25 +528,25 @@ export class HistoryStore {
     return row?.content ?? null;
   }
 
-  /** 更新 session 的 resume_id（SDK 级别的 resume ID） */
-  updateResumeId(threadKey: string, resumeId: string): void {
+  /** 更新 conversation 的 resume_id（SDK 级别的 resume ID） */
+  updateResumeId(conversationId: string, resumeId: string): void {
     this.db.run(
       `UPDATE sessions SET resume_id = ? WHERE id = ?`,
-      [resumeId, threadKey]
+      [resumeId, conversationId]
     );
   }
 
-  /** 更新 session 的 agent_session_id */
-  updateAgentSessionId(threadKey: string, agentSessionId: string): void {
+  /** 更新 conversation 的 agent_session_id */
+  updateAgentSessionId(conversationId: string, agentSessionId: string): void {
     this.db.run(
       `UPDATE sessions SET agent_session_id = ? WHERE id = ?`,
-      [agentSessionId, threadKey]
+      [agentSessionId, conversationId]
     );
   }
 
-  /** 获取活跃 sessions（用于启动恢复）。id 即 threadKey */
+  /** 获取活跃 sessions（用于启动恢复）。id 即 Sage 内部 conversationId */
   getActiveSessionsForRestore(maxAgeMs: number): Array<{
-    id: string;             // threadKey
+    id: string;             // conversationId
     agent_session_id: string; // provider session id (cc-xxx)
     resume_id: string;      // SDK resume id
     provider: string;
@@ -230,41 +562,55 @@ export class HistoryStore {
     ).all(this.env, cutoff) as any[];
   }
 
-  /** 按 threadKey 查询 session（返回 null 表示不存在） */
-  getSession(threadKey: string): {
-    id: string;
-    agent_session_id: string | null;
-    resume_id: string | null;
-    provider: string;
-    open_id: string | null;
-    last_active_at: string;
-  } | null {
+  /** 按内部 conversation id 查询 session（返回 null 表示不存在） */
+  getSession(conversationId: string): ConversationSession | null {
     return this.db.query(
-      `SELECT id, agent_session_id, resume_id, provider, open_id, last_active_at
+      `SELECT id, first_message_id, thread_id, agent_session_id, resume_id,
+              provider, open_id, chat_id, chat_type, last_active_at
        FROM sessions WHERE id = ? AND env = ?`
-    ).get(threadKey, this.env) as any ?? null;
+    ).get(conversationId, this.env) as ConversationSession | null ?? null;
   }
 
-  /** 清除 session 的 agent 关联（/clear 用） */
-  clearSessionAgent(threadKey: string): void {
+  /** 按第一条用户消息 message_id 查询 conversation。 */
+  getSessionByFirstMessageId(messageId: string): ConversationSession | null {
+    return this.db.query(
+      `SELECT id, first_message_id, thread_id, agent_session_id, resume_id,
+              provider, open_id, chat_id, chat_type, last_active_at
+       FROM sessions WHERE first_message_id = ? AND env = ?`
+    ).get(messageId, this.env) as ConversationSession | null ?? null;
+  }
+
+  /** 按飞书 thread_id 查询 conversation。 */
+  getSessionByThreadId(threadId: string): ConversationSession | null {
+    return this.db.query(
+      `SELECT id, first_message_id, thread_id, agent_session_id, resume_id,
+              provider, open_id, chat_id, chat_type, last_active_at
+       FROM sessions WHERE thread_id = ? AND env = ?`
+    ).get(threadId, this.env) as ConversationSession | null ?? null;
+  }
+
+  /** 清除 conversation 的 agent 关联（/clear 用） */
+  clearSessionAgent(conversationId: string): void {
     this.db.run(
       `UPDATE sessions SET agent_session_id = NULL, resume_id = NULL WHERE id = ?`,
-      [threadKey]
+      [conversationId]
     );
   }
 
-  /** 迁移 session_id（飞书 thread 创建时，msg:xxx → thread_id） */
-  migrateSessionId(oldId: string, newId: string): void {
-    this.db.run(`UPDATE events SET session_id = ? WHERE session_id = ?`, [newId, oldId]);
-    this.db.run(`UPDATE sessions SET id = ? WHERE id = ?`, [newId, oldId]);
-    this.logger.info(`历史记录 session 迁移: ${oldId} -> ${newId}`);
+  private resolveConversationId(idOrExternalId: string): string {
+    if (this.getSession(idOrExternalId)) return idOrExternalId;
+    const byThread = this.getSessionByThreadId(idOrExternalId);
+    if (byThread) return byThread.id;
+    const firstMessageId = idOrExternalId.startsWith('msg:') ? idOrExternalId.slice(4) : idOrExternalId;
+    return this.getSessionByFirstMessageId(firstMessageId)?.id ?? idOrExternalId;
   }
 
-  /** 查询某 session 的全部事件 */
+  /** 查询某 conversation 的全部事件；兼容传入 thread_id 或 first message_id */
   getSessionEvents(sessionId: string): any[] {
+    const conversationId = this.resolveConversationId(sessionId);
     return this.db.query(
       `SELECT * FROM events WHERE session_id = ? ORDER BY position`
-    ).all(sessionId);
+    ).all(conversationId);
   }
 
   /** 按日期查询 sessions + events */
@@ -306,8 +652,8 @@ export class HistoryStore {
     }));
   }
 
-  /** 获取某 session 最近 N 轮 user/assistant 文本对话（用于 fallback 上下文注入） */
-  getRecentConversation(sessionId: string, maxTurns: number = 5): Array<{ role: string; content: string }> {
+  /** 获取某 conversation 最近 N 轮 user/assistant 文本对话（用于 fallback 上下文注入） */
+  getRecentConversation(conversationId: string, maxTurns: number = 5): Array<{ role: string; content: string }> {
     // 子查询取最近 maxTurns*2 条（DESC），外层按 position ASC 恢复正序
     const rows = this.db.query(
       `SELECT role, content FROM (
@@ -316,7 +662,7 @@ export class HistoryStore {
          ORDER BY position DESC
          LIMIT ?
        ) ORDER BY position ASC`
-    ).all(sessionId, maxTurns * 2) as Array<{ role: string; content: string }>;
+    ).all(conversationId, maxTurns * 2) as Array<{ role: string; content: string }>;
 
     // 按轮次截断：从第一条 user 消息开始
     const firstUserIdx = rows.findIndex(r => r.role === 'user');
@@ -339,11 +685,13 @@ export class HistoryStore {
     ).all(`%${keyword}%`, limit);
   }
 
-  /** 按 session_id 前缀模糊匹配 */
+  /** 按 conversation_id / first_message_id / thread_id 前缀模糊匹配 */
   findSessionsByPrefix(prefix: string): any[] {
     return this.db.query(
-      `SELECT * FROM sessions WHERE id LIKE ? ORDER BY last_active_at DESC LIMIT 10`
-    ).all(`${prefix}%`);
+      `SELECT * FROM sessions
+       WHERE id LIKE ? OR first_message_id LIKE ? OR thread_id LIKE ?
+       ORDER BY last_active_at DESC LIMIT 10`
+    ).all(`${prefix}%`, `${prefix}%`, `${prefix}%`);
   }
 
   /** 获取最近的 sessions */

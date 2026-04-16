@@ -3,8 +3,8 @@
 import { AgentProvider, AgentSession, AgentResponse, AgentEvent } from './types';
 import { Logger } from '../utils';
 
-/** 查询 threadKey 对应的最近对话历史（由外部注入，避免直接依赖 HistoryStore） */
-export type RecentHistoryFn = (threadKey: string, maxTurns: number) => Array<{ role: string; content: string }>;
+/** 查询 conversationId 对应的最近对话历史（由外部注入，避免直接依赖 HistoryStore） */
+export type RecentHistoryFn = (conversationId: string, maxTurns: number) => Array<{ role: string; content: string }>;
 
 export class FallbackAgentProvider implements AgentProvider {
   readonly name: string;
@@ -18,8 +18,8 @@ export class FallbackAgentProvider implements AgentProvider {
   /** 当前活跃 provider 名称（用于新会话） */
   private _activeProviderName: string;
 
-  /** agent_session_id → threadKey 映射，由 SageCore 注册 */
-  private sessionToThread: Map<string, string> = new Map();
+  /** agent_session_id → conversationId 映射，由 SageCore 注册 */
+  private sessionToConversation: Map<string, string> = new Map();
   private getRecentHistory?: RecentHistoryFn;
 
   constructor(providerList: AgentProvider[]) {
@@ -63,9 +63,9 @@ export class FallbackAgentProvider implements AgentProvider {
     this.getRecentHistory = fn;
   }
 
-  /** 注册 sessionId → threadKey 映射（SageCore 每次发消息前调用） */
-  registerSessionThread(sessionId: string, threadKey: string): void {
-    this.sessionToThread.set(sessionId, threadKey);
+  /** 注册 sessionId → conversationId 映射（SageCore 每次发消息前调用） */
+  registerSessionConversation(sessionId: string, conversationId: string): void {
+    this.sessionToConversation.set(sessionId, conversationId);
   }
 
   async initialize(): Promise<void> {
@@ -220,15 +220,15 @@ export class FallbackAgentProvider implements AgentProvider {
       return message;
     }
 
-    const threadKey = this.sessionToThread.get(originalSessionId);
-    if (!threadKey) {
-      this.logger.warn(`无法找到 sessionId ${originalSessionId} 对应的 threadKey，跳过上下文注入`);
+    const conversationId = this.sessionToConversation.get(originalSessionId);
+    if (!conversationId) {
+      this.logger.warn(`无法找到 sessionId ${originalSessionId} 对应的 conversationId，跳过上下文注入`);
       return message;
     }
 
-    const history = this.getRecentHistory(threadKey, 5);
+    const history = this.getRecentHistory(conversationId, 5);
     if (history.length === 0) {
-      this.logger.info(`未命中历史上下文: thread=${threadKey}, session=${originalSessionId}`);
+      this.logger.info(`未命中历史上下文: conversation=${conversationId}, session=${originalSessionId}`);
       return message;
     }
 
@@ -237,7 +237,7 @@ export class FallbackAgentProvider implements AgentProvider {
       .join('\n');
 
     this.logger.info(
-      `注入降级上下文: thread=${threadKey}, session=${originalSessionId}, turns=${history.length}, historyChars=${historyText.length}, messageChars=${message.length}`
+      `注入降级上下文: conversation=${conversationId}, session=${originalSessionId}, turns=${history.length}, historyChars=${historyText.length}, messageChars=${message.length}`
     );
 
     return `[上下文恢复] 由于服务切换，以下是之前的对话记录供参考：\n${historyText}\n---\n${message}`;
