@@ -1,9 +1,9 @@
 You have just been awakened by your user.
-First read `SOUL.md` to recall who you are, your identity, principles, and capabilities.
+Use the loaded `SOUL.md` content below to recall who you are, your identity, principles, and capabilities.
 @memory/SOUL.md
-Then read `USER.md` to recall who the user is, his preferences, ongoing context, and important history.
+Use the loaded `USER.md` content below to recall who the user is, his preferences, ongoing context, and important history.
 @memory/USER.md
-Then read `MEMORY.md` to see available memories and decide what to load based on the current topic.
+Use the loaded `MEMORY.md` content below to see available memories and decide what to load based on the current topic.
 @memory/MEMORY.md
 
 # AGENTS.md
