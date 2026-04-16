@@ -89,6 +89,7 @@ export interface CodexProviderConfig {
   type: 'codex';
   workDir?: string;       // Codex 工作目录
   model?: string;         // 模型，如 'o4-mini', 'o3'
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
 }
 

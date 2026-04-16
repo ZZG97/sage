@@ -110,6 +110,7 @@ CLAUDE_CODE_MODEL=sonnet
 # --- Codex 配置（AGENT_PROVIDER=codex 时）---
 CODEX_WORK_DIR=/path/to/your/workspace
 CODEX_MODEL=gpt-5.3-codex
+CODEX_REASONING_EFFORT=medium
 CODEX_SANDBOX_MODE=danger-full-access
 
 # === 服务器配置 ===

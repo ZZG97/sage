@@ -59,6 +59,7 @@ export function getProviderConfig(type: string): AgentProviderConfig | null {
         type: 'codex',
         workDir: process.env.CODEX_WORK_DIR,
         model: process.env.CODEX_MODEL || 'gpt-5.3-codex',
+        reasoningEffort: process.env.CODEX_REASONING_EFFORT as 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | undefined,
         sandboxMode: (process.env.CODEX_SANDBOX_MODE as any) || 'danger-full-access',
       };
 

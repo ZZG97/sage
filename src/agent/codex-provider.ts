@@ -19,6 +19,7 @@ export class CodexProvider implements AgentProvider {
 
   private workDir: string;
   private model: string;
+  private reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   private sandboxMode: 'read-only' | 'workspace-write' | 'danger-full-access';
 
   constructor(config: CodexProviderConfig) {
@@ -27,6 +28,7 @@ export class CodexProvider implements AgentProvider {
       ? config.workDir.replace('~', process.env.HOME || '')
       : (config.workDir ?? process.cwd());
     this.model = config.model ?? 'gpt-5.3-codex';
+    this.reasoningEffort = config.reasoningEffort;
     this.sandboxMode = config.sandboxMode ?? 'danger-full-access';
 
     // apiKey 可选：有则用 API key 认证，无则走 ~/.codex/auth.json（ChatGPT 订阅）
@@ -41,6 +43,7 @@ export class CodexProvider implements AgentProvider {
     this.logger.info('Codex provider 初始化完成');
     this.logger.info(`workDir: ${this.workDir}`);
     this.logger.info(`model: ${this.model}`);
+    this.logger.info(`reasoningEffort: ${this.reasoningEffort || 'default'}`);
     this.logger.info(`sandboxMode: ${this.sandboxMode}`);
   }
 
@@ -99,6 +102,7 @@ export class CodexProvider implements AgentProvider {
         workingDirectory: this.workDir,
         approvalPolicy: 'never' as const,
         skipGitRepoCheck: true,
+        modelReasoningEffort: this.reasoningEffort,
       };
 
       if (existingThreadId) {
