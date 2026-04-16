@@ -4,6 +4,7 @@ import { dailyJournal } from './daily-journal';
 import { weeklyConsolidation } from './weekly-consolidation';
 import { eveningGreeting } from './greeting';
 import { dailyWeather } from './weather';
+import { syncSystemPrompts } from './system-prompt-sync';
 
 /** All built-in scheduled tasks */
 export function getBuiltinTasks(): BuiltinTaskDef[] {
@@ -27,6 +28,12 @@ export function getBuiltinTasks(): BuiltinTaskDef[] {
       name: 'evening-greeting',
       pattern: '0 18 * * *',    // 每天 18:00
       handler: eveningGreeting,
+      allowInDev: true,
+    },
+    {
+      name: 'system-prompt-sync',
+      pattern: '10 3 * * *',     // 每天 03:10 同步 Claude Code / Codex 系统提示
+      handler: syncSystemPrompts,
       allowInDev: true,
     },
   ];

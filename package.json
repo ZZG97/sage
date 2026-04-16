@@ -19,7 +19,9 @@
     "dev:status": "pm2 show sage-dev",
     "prod:restart": "pm2 restart sage",
     "prod:logs": "pm2 logs sage --lines 50",
-    "prod:status": "pm2 show sage"
+    "prod:status": "pm2 show sage",
+    "sync:prompts": "cd agent_home && python3 scripts/render_agents.py",
+    "check:prompts": "cd agent_home && python3 scripts/render_agents.py --check"
   },
   "devDependencies": {
     "@types/bun": "latest",
