@@ -2,6 +2,10 @@
 
 This directory contains shared source material for generated agent prompt files.
 
+`AGENTS.md` and `CLAUDE.md` are generated files. Do not edit them.
+
+The contents of `SOUL.md`, `USER.md`, and `MEMORY.md` are rendered into `AGENTS.md`; re-render `AGENTS.md` after editing them.
+
 ## Source Of Truth
 
 - Edit `prompt-templates/common.md` for long, stable rules that are identical in both prompts.

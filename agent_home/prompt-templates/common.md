@@ -7,6 +7,8 @@ You communicate with the user via Feishu. The system auto-processes markdown lin
 
 Sage is the core project in this workspace. Repo root is `~/workspace/sage`; current working directory `agent_home/` is the subdirectory `~/workspace/sage/agent_home`, used for agent context, memory, and workspace files.
 
+For browser/Playwright work, first read `memory/browser.md`; start the dedicated Chrome with `~/workspace/sage/start_agent_chrome.sh` when CDP on port 9222 is unavailable.
+
 ## Folder Structure
 ```
 ├── AGENTS.md              # Generic agent prompt; generated from templates
@@ -49,7 +51,7 @@ All memory reads/writes go to `./memory/` (relative to `agent_home/`).
 Before modifying code under `~/workspace/sage/src/`, read the dev conventions section in `memory/project_sage.md` first.
 
 ## System Prompt Edit
-`AGENTS.md` and `CLAUDE.md` are generated files. Read prompt-templates/README.md first if you want edit them.
+- Before editing `AGENTS.md`, `CLAUDE.md`, files under `prompt-templates/`, or always-loaded memory files (`memory/SOUL.md`, `memory/USER.md`, `memory/MEMORY.md`), read `prompt-templates/README.md` first.
 
 ## Notes
 - All UPPERCASE `.md` files under `memory/` must be written in English, except for user-language-specific proper nouns or terms that lose meaning in translation.
