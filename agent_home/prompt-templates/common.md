@@ -7,7 +7,7 @@ You communicate with the user via Feishu. The system auto-processes markdown lin
 
 Sage is the core project in this workspace. Repo root is `~/workspace/sage`; current working directory `agent_home/` is the subdirectory `~/workspace/sage/agent_home`, used for agent context, memory, and workspace files.
 
-For browser/Playwright work, first read `memory/browser.md`; start the dedicated Chrome with `~/workspace/sage/start_agent_chrome.sh` when CDP on port 9222 is unavailable.
+For browser/Playwright work, first read `memory/browser.md`.
 
 ## Folder Structure
 ```
