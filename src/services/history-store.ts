@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 
 // 默认 db 路径: {项目根}/data/history.db
 const DEFAULT_DB_PATH = resolve(import.meta.dir, '../../data/history.db');
+const DEFAULT_DEV_DB_PATH = resolve(import.meta.dir, '../../data/history-dev.db');
 
 export interface SessionWithEvents {
   id: string;
@@ -63,9 +64,10 @@ export class HistoryStore {
     this.logger = new Logger('HistoryStore');
     this.env = env;
     this.tzModifier = sqliteTimezoneModifier(timezone);
-    const resolvedPath = dbPath ?? DEFAULT_DB_PATH;
+    const resolvedPath = dbPath ?? (env === 'dev' ? DEFAULT_DEV_DB_PATH : DEFAULT_DB_PATH);
     this.db = new Database(resolvedPath, { create: true });
     this.db.exec('PRAGMA journal_mode = WAL');
+    this.db.exec('PRAGMA busy_timeout = 5000');
     this.initSchema();
     this.logger.info(`对话历史数据库已打开: ${resolvedPath}`);
   }

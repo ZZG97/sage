@@ -915,10 +915,18 @@ export class SageCore {
   async sendProactiveMessage(openId: string, text: string): Promise<string> {
     const messageId = await this.feishuService.sendTextToUser(openId, text);
     if (messageId) {
-      this.historyStore.saveProactiveMessage(messageId, text, openId);
-      this.logger.info(`主动消息已记录: messageId=${messageId}`);
+      this.recordProactiveMessageAfterSend(messageId, text, openId);
     }
     return messageId;
+  }
+
+  private recordProactiveMessageAfterSend(messageId: string, content: string, openId: string): void {
+    try {
+      this.historyStore.saveProactiveMessage(messageId, content, openId);
+      this.logger.info(`主动消息已记录: messageId=${messageId}`);
+    } catch (err) {
+      this.logger.warn(`主动消息已发送但记录失败，避免重试重复发送: messageId=${messageId}`, err);
+    }
   }
 
   /**
@@ -953,7 +961,7 @@ export class SageCore {
 
     if (result?.replyMessageId) {
       this.rememberMessageConversation(result.replyMessageId, conversationId);
-      this.historyStore.saveProactiveMessage(result.replyMessageId, `[定时任务] ${prompt}`, openId);
+      this.recordProactiveMessageAfterSend(result.replyMessageId, `[定时任务] ${prompt}`, openId);
       this.logger.info(`主动 agent 任务已发送: messageId=${result.replyMessageId}, session=${session.id}`);
     }
   }
