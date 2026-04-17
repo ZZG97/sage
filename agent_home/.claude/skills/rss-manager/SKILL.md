@@ -1,5 +1,5 @@
 ---
-name: rss-reader
+name: rss-manager
 description: >
   Manage RSS and RSSHub-backed information intake. Use when the user says "读一下RSS", "帮我汇总今天的订阅",
   "RSS digest", "今日资讯", "信息汇总", asks to read/analyze RSS feeds, add/remove/expand subscriptions,
@@ -10,7 +10,7 @@ description: >
 user_invocable: true
 ---
 
-# RSS Intake Skill
+# RSS Manager Skill
 
 Use this skill for the user's RSS information pipeline: local RSSHub configuration, subscription list maintenance,
 feed fetching, deduplication, content analysis, and digest reporting.
@@ -38,7 +38,7 @@ If a request spans multiple areas, read them in this order: config first, subscr
 The digest entry point is:
 
 ```bash
-CHUNKS=$(./.claude/skills/rss-reader/scripts/fetch_items.sh)
+CHUNKS=$(./.claude/skills/rss-manager/scripts/fetch_items.sh)
 ```
 
 The script reads feeds from `~/.rsshub/feeds.txt` first, then skill-local `feeds.txt`, deduplicates against

@@ -7,7 +7,7 @@ Use this file when adding, removing, expanding, or debugging RSS subscriptions.
 The fetch script reads feeds from:
 
 1. `~/.rsshub/feeds.txt`
-2. `rss-reader/feeds.txt` inside the skill directory
+2. `rss-manager/feeds.txt` inside the skill directory
 
 Prefer `~/.rsshub/feeds.txt` for user-level subscriptions. Create the directory if missing.
 

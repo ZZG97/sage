@@ -7,7 +7,7 @@ Use this file when reading, organizing, summarizing, or reporting RSS content.
 Run:
 
 ```bash
-CHUNKS=$(./.claude/skills/rss-reader/scripts/fetch_items.sh)
+CHUNKS=$(./.claude/skills/rss-manager/scripts/fetch_items.sh)
 ```
 
 The script:
