@@ -43,6 +43,16 @@ For each item, extract:
 
 Prefer signal over coverage. Group similar items instead of repeating summaries.
 
+User-specific RSS preferences:
+
+- Current subscription categories: Tech/AI-oriented Zhihu activities and pins; Zhihu daily/pin daily/weekly; selected Zhihu
+  followees; selected Xueqiu followees. `zhihu/hot` was removed because it was broad, stale, and low-signal.
+- Xueqiu `metalslime` often posts fragmented replies, but the account is important to Laozhang. Do not dismiss these items as
+  low-signal only because they are replies. Cluster the fragments by topic first, then extract useful investment or macro
+  claims, especially repeated views on sectors, demographics, consumption, energy, AI infrastructure, and market structure.
+- Track source quality during each digest. If a feed repeatedly produces low-signal, stale, noisy, duplicate, or off-topic
+  items, mention it in the report and suggest whether to remove, limit, or keep watching the source.
+
 ## Analysis Prompt
 
 Use this prompt for batch analysis when delegating is allowed:

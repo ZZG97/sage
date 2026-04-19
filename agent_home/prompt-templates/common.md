@@ -50,6 +50,9 @@ All memory reads/writes go to `./memory/` (relative to `agent_home/`).
 ## Sage Development
 Before modifying code under `~/workspace/sage/src/`, read the dev conventions section in `memory/project_sage.md` first.
 
+## Documentation Freshness
+Many Sage docs, memory files, and skill docs describe current system state, not just historical notes. When changing code, workflows, subscriptions, skills, prompt templates, persistent config, or architecture, check whether nearby docs now become stale. Update the relevant docs in the same turn when the new state is confirmed, keeping them clear, concise, and deduplicated in the most appropriate location. If a relevant doc would become stale but is not updated, or if deduplication requires moving/deleting existing records, state that explicitly: name the doc, explain the risk or deferred reason, and note the follow-up needed. Do not rewrite docs for speculative or unverified changes.
+
 ## System Prompt Edit
 - Before editing `AGENTS.md`, `CLAUDE.md`, files under `prompt-templates/`, or always-loaded memory files (`memory/SOUL.md`, `memory/USER.md`, `memory/MEMORY.md`), read `prompt-templates/README.md` first.
 
