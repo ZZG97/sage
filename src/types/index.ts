@@ -47,6 +47,7 @@ export interface MessageContext {
   chatType: 'p2p' | 'group'; // 聊天类型
   threadId?: string; // 话题ID（如果在话题中回复）
   rootId?: string; // 根消息ID（话题的第一条消息）
+  parentId?: string; // 父消息ID（回复场景）
   attachments?: MessageAttachment[]; // 附件列表
 }
 

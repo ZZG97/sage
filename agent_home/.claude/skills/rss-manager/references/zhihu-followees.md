@@ -35,6 +35,8 @@ name, url_token, id, headline, follower_count, answer_count, articles_count, use
 ```
 
 Use `url_token` for RSSHub routes. Do not use the internal `id` in RSSHub feed URLs.
+Use `name` as the display name when attributing Zhihu people feed items, unless the item title/description explicitly shows
+a more specific author/display name.
 
 ## Current Subscription State
 

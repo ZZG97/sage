@@ -6,7 +6,7 @@ import type { TaskContext } from '../task-scheduler';
 export async function dailyJournal(ctx: TaskContext): Promise<void> {
   const prompt = '请总结今天的对话记录，生成日记';
   if (ctx.runAgentTask) {
-    await ctx.runAgentTask(prompt);
+    await ctx.runAgentTask(prompt, '每日日记');
     return;
   }
   const session = await ctx.agent.createSession();

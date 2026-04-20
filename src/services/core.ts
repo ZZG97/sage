@@ -11,6 +11,7 @@ import { execSync } from 'child_process';
 // ─── 常量 ───
 const DRAIN_TIMEOUT = 30_000; // drain 最多等 30s
 const MAX_SESSION_AGE = 24 * 60 * 60 * 1000; // 会话最大存活时间 24h
+const DEFAULT_PROACTIVE_TOPIC = 'Sage 主动任务';
 
 export class SageCore {
   private feishuService: FeishuService;
@@ -164,11 +165,12 @@ export class SageCore {
       const { sessionId, isNew } = await this.getOrCreateAgentSession(conversationId);
 
       // 仅在新会话首条消息时注入主动消息上下文（避免 thread 内每条消息都重复注入）
-      if (isNew && ctx.rootId) {
-        const proactiveContent = this.historyStore.getProactiveMessage(ctx.rootId);
+      const replyRootMessageId = ctx.rootId ?? ctx.parentId;
+      if (isNew && replyRootMessageId) {
+        const proactiveContent = this.historyStore.getProactiveMessage(replyRootMessageId);
         if (proactiveContent) {
           processedMessage = `[bot之前主动发给user的消息: "${proactiveContent}"  后续是user的新消息]\n\n${processedMessage}`;
-          this.logger.info(`注入主动消息上下文: rootId=${ctx.rootId}`);
+          this.logger.info(`注入主动消息上下文: rootMessageId=${replyRootMessageId}`);
         }
       }
 
@@ -220,7 +222,7 @@ export class SageCore {
     sessionId: string;
     anchor:
       | { kind: 'reply'; parentMessageId: string }
-      | { kind: 'proactive'; openId: string };
+      | { kind: 'proactive'; openId: string; title?: string };
   }): Promise<{ replyMessageId: string } | null> {
     const { prompt, conversationId, sessionId, anchor } = opts;
 
@@ -232,7 +234,22 @@ export class SageCore {
       const r = await this.feishuService.replyCard(anchor.parentMessageId, initialCard);
       replyMessageId = r.messageId;
     } else {
-      replyMessageId = await this.feishuService.sendCardToUser(anchor.openId, initialCard);
+      const topic = this.normalizeProactiveTopic(anchor.title ?? prompt);
+      const rootMessageId = await this.feishuService.sendTextToUser(anchor.openId, topic);
+      if (!rootMessageId) {
+        this.logger.error('发送主动任务根消息失败，无 messageId');
+        return null;
+      }
+
+      this.rememberMessageConversation(rootMessageId, conversationId);
+      const bound = this.historyStore.setConversationFirstMessageId(conversationId, rootMessageId);
+      if (!bound) {
+        this.logger.warn(`主动任务根消息绑定 conversation first_message_id 失败: conversation=${conversationId}, messageId=${rootMessageId}`);
+      }
+      this.recordProactiveMessageAfterSend(rootMessageId, `[主动任务] ${prompt}`, anchor.openId);
+
+      const r = await this.feishuService.replyCard(rootMessageId, initialCard);
+      replyMessageId = r.messageId;
     }
 
     if (!replyMessageId) {
@@ -653,60 +670,129 @@ export class SageCore {
     if (threadId) this.threadConversations.set(threadId, conversationId);
   }
 
+  private normalizeProactiveTopic(title?: string): string {
+    const topic = (title || DEFAULT_PROACTIVE_TOPIC).replace(/\s+/g, ' ').trim() || DEFAULT_PROACTIVE_TOPIC;
+    return topic.length > 80 ? `${topic.slice(0, 77)}...` : topic;
+  }
+
+  private getReplyRootMessageId(ctx: MessageContext): string | undefined {
+    return ctx.rootId ?? ctx.parentId;
+  }
+
+  private bindIncomingConversation(ctx: MessageContext, conversationId: string): void {
+    this.rememberMessageConversation(ctx.messageId, conversationId);
+
+    const rootMessageId = this.getReplyRootMessageId(ctx);
+    this.rememberMessageConversation(rootMessageId, conversationId);
+
+    if (!ctx.threadId) return;
+
+    this.rememberThreadConversation(ctx.threadId, conversationId);
+    const existing = this.historyStore.getSessionByThreadId(ctx.threadId);
+    if (!existing) {
+      this.historyStore.setConversationThreadId(conversationId, ctx.threadId);
+    } else if (existing.id !== conversationId) {
+      this.logger.warn(`thread_id 已绑定到其他 conversation: threadId=${ctx.threadId}, existing=${existing.id}, current=${conversationId}`);
+    }
+  }
+
   private getOrCreateConversation(ctx: MessageContext): string {
     if (ctx.threadId) {
       const cached = this.threadConversations.get(ctx.threadId);
       if (cached) {
-        this.rememberMessageConversation(ctx.messageId, cached);
+        this.bindIncomingConversation(ctx, cached);
         return cached;
       }
 
       const existing = this.historyStore.getSessionByThreadId(ctx.threadId);
       if (existing) {
-        this.rememberThreadConversation(ctx.threadId, existing.id);
-        this.rememberMessageConversation(ctx.messageId, existing.id);
+        this.bindIncomingConversation(ctx, existing.id);
         return existing.id;
       }
     }
 
+    const rootMessageId = this.getReplyRootMessageId(ctx);
+    if (rootMessageId) {
+      const cachedByRoot = this.messageConversations.get(rootMessageId);
+      if (cachedByRoot) {
+        this.bindIncomingConversation(ctx, cachedByRoot);
+        return cachedByRoot;
+      }
+
+      const existingByRoot = this.historyStore.getSessionByFirstMessageId(rootMessageId);
+      if (existingByRoot) {
+        this.bindIncomingConversation(ctx, existingByRoot.id);
+        return existingByRoot.id;
+      }
+    }
+
     const cachedByMessage = this.messageConversations.get(ctx.messageId);
-    if (cachedByMessage) return cachedByMessage;
+    if (cachedByMessage) {
+      this.bindIncomingConversation(ctx, cachedByMessage);
+      return cachedByMessage;
+    }
 
     const existingByMessage = this.historyStore.getSessionByFirstMessageId(ctx.messageId);
     if (existingByMessage) {
-      this.rememberMessageConversation(ctx.messageId, existingByMessage.id);
-      this.rememberThreadConversation(ctx.threadId ?? existingByMessage.thread_id ?? undefined, existingByMessage.id);
+      this.bindIncomingConversation(ctx, existingByMessage.id);
+      this.rememberThreadConversation(existingByMessage.thread_id ?? undefined, existingByMessage.id);
       return existingByMessage.id;
     }
 
+    const firstMessageId = rootMessageId ?? ctx.messageId;
     const conversationId = this.historyStore.createConversation(this.agent.name, {
-      firstMessageId: ctx.threadId ? ctx.rootId ?? ctx.messageId : ctx.messageId,
+      firstMessageId,
       threadId: ctx.threadId,
       openId: ctx.openId,
       chatId: ctx.chatId,
       chatType: ctx.chatType,
     });
 
-    this.rememberMessageConversation(ctx.messageId, conversationId);
-    this.rememberThreadConversation(ctx.threadId, conversationId);
-    this.logger.info(`创建 conversation: id=${conversationId}, firstMessage=${ctx.threadId ? ctx.rootId ?? ctx.messageId : ctx.messageId}, threadId=${ctx.threadId || '无'}`);
+    this.bindIncomingConversation(ctx, conversationId);
+    this.logger.info(`创建 conversation: id=${conversationId}, firstMessage=${firstMessageId}, threadId=${ctx.threadId || '无'}`);
     return conversationId;
   }
 
   private findConversation(ctx: MessageContext): string | null {
     if (ctx.threadId) {
       const cached = this.threadConversations.get(ctx.threadId);
-      if (cached) return cached;
+      if (cached) {
+        this.bindIncomingConversation(ctx, cached);
+        return cached;
+      }
       const byThread = this.historyStore.getSessionByThreadId(ctx.threadId);
       if (byThread) {
-        this.rememberThreadConversation(ctx.threadId, byThread.id);
+        this.bindIncomingConversation(ctx, byThread.id);
         return byThread.id;
       }
     }
 
+    const rootMessageId = this.getReplyRootMessageId(ctx);
+    if (rootMessageId) {
+      const cachedByRoot = this.messageConversations.get(rootMessageId);
+      if (cachedByRoot) {
+        this.bindIncomingConversation(ctx, cachedByRoot);
+        return cachedByRoot;
+      }
+
+      const byRoot = this.historyStore.getSessionByFirstMessageId(rootMessageId);
+      if (byRoot) {
+        this.bindIncomingConversation(ctx, byRoot.id);
+        return byRoot.id;
+      }
+    }
+
     const cached = this.messageConversations.get(ctx.messageId);
-    if (cached) return cached;
-    return this.historyStore.getSessionByFirstMessageId(ctx.messageId)?.id ?? null;
+    if (cached) {
+      this.bindIncomingConversation(ctx, cached);
+      return cached;
+    }
+    const byMessage = this.historyStore.getSessionByFirstMessageId(ctx.messageId);
+    if (byMessage) {
+      this.bindIncomingConversation(ctx, byMessage.id);
+      return byMessage.id;
+    }
+    return null;
   }
 
   private async getOrCreateAgentSession(conversationId: string): Promise<{ sessionId: string; isNew: boolean }> {
@@ -934,7 +1020,7 @@ export class SageCore {
    * 每次执行创建独立 session，与现有 thread 不共享上下文。
    * 用于调度器的 agent 类型任务（例如"每天早上帮我汇总 xxx"）。
    */
-  async runAgentForOwner(prompt: string, openId: string): Promise<void> {
+  async runAgentForOwner(prompt: string, openId: string, title?: string): Promise<void> {
     const session = await this.agent.createSession();
     this.restoredSessions.add(session.id);
 
@@ -956,12 +1042,11 @@ export class SageCore {
       prompt,
       conversationId,
       sessionId: session.id,
-      anchor: { kind: 'proactive', openId },
+      anchor: { kind: 'proactive', openId, title },
     });
 
     if (result?.replyMessageId) {
       this.rememberMessageConversation(result.replyMessageId, conversationId);
-      this.recordProactiveMessageAfterSend(result.replyMessageId, `[定时任务] ${prompt}`, openId);
       this.logger.info(`主动 agent 任务已发送: messageId=${result.replyMessageId}, session=${session.id}`);
     }
   }

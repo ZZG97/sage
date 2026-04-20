@@ -167,6 +167,7 @@ export class FeishuService {
         chatType: message.chat_type,
         threadId,
         rootId: message.root_id || undefined,
+        parentId: message.parent_id || undefined,
         attachments: parsed.attachments,
       };
 

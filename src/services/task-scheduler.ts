@@ -14,7 +14,7 @@ export interface TaskContext {
   /** 主动向 owner 发纯文本消息（由 SageCore 注入），返回 message_id */
   sendMessageToOwner?: (text: string) => Promise<string | void>;
   /** 主动触发一次 agent 任务并以流式卡片发送给 owner（由 SageCore 注入） */
-  runAgentTask?: (prompt: string) => Promise<void>;
+  runAgentTask?: (prompt: string, title?: string) => Promise<void>;
 }
 
 /** Handler function for built-in tasks */
@@ -37,6 +37,8 @@ export interface DynamicTask {
   kind: 'message' | 'agent';
   /** kind='message' 时：要发送的文本；kind='agent' 时：作为 agent 的 prompt */
   message: string;
+  /** kind='agent' 时：主动任务根消息标题 */
+  title: string | null;
   /** Cron pattern (recurring) OR null for one-shot */
   pattern: string | null;
   /** Epoch ms for one-shot trigger time */
@@ -55,6 +57,8 @@ interface TaskJobData {
   kind?: 'message' | 'agent';
   /** For dynamic: payload — text for 'message', prompt for 'agent' */
   message?: string;
+  /** For dynamic agent: proactive topic text */
+  title?: string;
 }
 
 const QUEUE_NAME = 'sage:tasks';
@@ -91,6 +95,7 @@ export class TaskScheduler {
       CREATE TABLE IF NOT EXISTS dynamic_tasks (
         id TEXT PRIMARY KEY,
         message TEXT NOT NULL,
+        title TEXT,
         pattern TEXT,
         trigger_at INTEGER,
         status TEXT NOT NULL DEFAULT 'active',
@@ -103,6 +108,11 @@ export class TaskScheduler {
     if (!hasKind) {
       this.db.exec(`ALTER TABLE dynamic_tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'message'`);
       this.logger.info('dynamic_tasks 表迁移：新增 kind 字段');
+    }
+    const hasTitle = cols.some(c => c.name === 'title');
+    if (!hasTitle) {
+      this.db.exec(`ALTER TABLE dynamic_tasks ADD COLUMN title TEXT`);
+      this.logger.info('dynamic_tasks 表迁移：新增 title 字段');
     }
   }
 
@@ -171,6 +181,8 @@ export class TaskScheduler {
     kind?: 'message' | 'agent';
     /** kind='message' 时作为文本内容；kind='agent' 时作为 prompt */
     message: string;
+    /** kind='agent' 时作为主动任务根消息标题 */
+    title?: string;
     /** Cron pattern for recurring, e.g. "30 9 * * 1-5" */
     pattern?: string;
     /** Epoch ms for one-shot trigger */
@@ -187,6 +199,7 @@ export class TaskScheduler {
       id,
       kind,
       message: opts.message,
+      title: opts.title || null,
       pattern: opts.pattern || null,
       trigger_at: opts.triggerAt || null,
       status: 'active',
@@ -195,13 +208,13 @@ export class TaskScheduler {
 
     // Persist to DB
     this.db.run(
-      `INSERT INTO dynamic_tasks (id, kind, message, pattern, trigger_at, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [task.id, task.kind, task.message, task.pattern, task.trigger_at, task.status, task.created_at],
+      `INSERT INTO dynamic_tasks (id, kind, message, title, pattern, trigger_at, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [task.id, task.kind, task.message, task.title, task.pattern, task.trigger_at, task.status, task.created_at],
     );
 
     // Register with bunqueue
-    const jobData: TaskJobData = { type: 'dynamic', task_id: id, kind, message: opts.message };
+    const jobData: TaskJobData = { type: 'dynamic', task_id: id, kind, message: opts.message, title: opts.title };
 
     if (opts.triggerAt) {
       const delay = opts.triggerAt - now;
@@ -277,6 +290,7 @@ export class TaskScheduler {
         task_id: task.id,
         kind: task.kind || 'message',
         message: task.message,
+        title: task.title || undefined,
       };
 
       if (task.trigger_at) {
@@ -304,7 +318,7 @@ export class TaskScheduler {
 
   /** Process a job from the queue */
   private async processJob(job: { data: TaskJobData }): Promise<void> {
-    const { type, task_id, kind, message } = job.data;
+    const { type, task_id, kind, message, title } = job.data;
 
     if (type === 'builtin') {
       const handler = this.builtinHandlers.get(task_id);
@@ -332,7 +346,7 @@ export class TaskScheduler {
             this.logger.warn('runAgentTask 未注入，跳过 agent 类动态任务');
             return;
           }
-          await this.ctx.runAgentTask(message || '(空 prompt)');
+          await this.ctx.runAgentTask(message || '(空 prompt)', title);
           this.logger.info(`动态 agent 任务已完成: ${task_id}`);
         } else {
           if (!this.ctx.sendMessageToOwner) {

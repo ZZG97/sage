@@ -47,6 +47,9 @@ Dense, telegraphic short sentences. No filler words. Comma/semicolon-joined fact
 ## Memory
 All memory reads/writes go to `./memory/` (relative to `agent_home/`).
 
+## Prompt And Memory Organization
+Prompt organization is architecture design. Before adding or moving instructions, memory, skill references, workflow notes, or persistent config, identify the current consumers, owner, scope, lifecycle, and load path. Put the item in the narrowest place that all current consumers will read. Do not promote to always-loaded memory or global prompt text because something might be useful later; promote only after real cross-context reuse. If the placement is non-obvious, state the placement reasoning before editing.
+
 ## Sage Development
 Before modifying code under `~/workspace/sage/src/`, read the dev conventions section in `memory/project_sage.md` first.
 

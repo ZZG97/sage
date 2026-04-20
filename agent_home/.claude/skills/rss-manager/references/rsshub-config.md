@@ -70,6 +70,22 @@ Fix with one of:
 - `diygod/rsshub:chromium-bundled`, simplest for local single-instance deployment.
 - `browserless/chrome` plus `PUPPETEER_WS_ENDPOINT`, useful for multi-service browser pools.
 
+## X / Twitter Routes
+
+The user timeline route is:
+
+```text
+http://localhost:1200/twitter/user/<username>
+```
+
+Current RSSHub requires Twitter/X authentication for this route. Preferred config is `TWITTER_AUTH_TOKEN`, a
+comma-separated list of `auth_token` cookies from logged-in Twitter Web. Add it to `.env`, pass it through
+`docker-compose.yml`, restart RSSHub, then validate the target route. Do not print the token.
+
+The old `TWITTER_USERNAME` / `TWITTER_PASSWORD` / `TWITTER_AUTHENTICATION_SECRET` login flow no longer works since
+Twitter mobile client attestation was added in October 2025. Developer API credentials are another option, but require
+paid Twitter API access.
+
 ## Validation
 
 After changes:

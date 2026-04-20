@@ -41,6 +41,11 @@ For each item, extract:
 - Why it might matter to the user.
 - Whether it suggests an action, follow-up, or watch item.
 
+Before attribution, prefer explicit display names from item title/description/author metadata. For Zhihu people feeds, use
+`references/zhihu-followees.md` and its canonical inventory to map `url_token` to `name` when item content is not explicit.
+Use skill-local `references/source-aliases.md` only for exceptions not derivable from content or canonical inventories.
+RSSHub feed paths, Zhihu slugs, numeric Xueqiu ids, and X/Twitter handles may not equal the public display name.
+
 Prefer signal over coverage. Group similar items instead of repeating summaries.
 
 User-specific RSS preferences:
@@ -50,6 +55,9 @@ User-specific RSS preferences:
 - Xueqiu `metalslime` often posts fragmented replies, but the account is important to Laozhang. Do not dismiss these items as
   low-signal only because they are replies. Cluster the fragments by topic first, then extract useful investment or macro
   claims, especially repeated views on sectors, demographics, consumption, energy, AI infrastructure, and market structure.
+- X/Twitter `bboczeng` ("bobo") is followed mainly for investment-related views. Show these items when they discuss investing,
+  markets, AI infrastructure, semiconductors, crypto, long-term allocation, or portfolio tactics, even if the tone is casual
+  or opinionated. Separate factual claims from personal views and mark unverified market/news claims as such.
 - Track source quality during each digest. If a feed repeatedly produces low-signal, stale, noisy, duplicate, or off-topic
   items, mention it in the report and suggest whether to remove, limit, or keep watching the source.
 

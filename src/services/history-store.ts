@@ -467,6 +467,32 @@ export class HistoryStore {
     );
   }
 
+  /** 给 conversation 绑定首条飞书消息 id。主动卡片发送后才拿得到 message_id。 */
+  setConversationFirstMessageId(conversationId: string, firstMessageId: string): boolean {
+    const current = this.getSession(conversationId);
+    if (!current) {
+      this.logger.warn(`绑定 first_message_id 失败，conversation 不存在: ${conversationId}`);
+      return false;
+    }
+
+    if (current.first_message_id && current.first_message_id !== firstMessageId) {
+      this.logger.warn(`绑定 first_message_id 冲突: conversation=${conversationId}, current=${current.first_message_id}, new=${firstMessageId}`);
+      return false;
+    }
+
+    const existing = this.getSessionByFirstMessageId(firstMessageId);
+    if (existing && existing.id !== conversationId) {
+      this.logger.warn(`first_message_id 已绑定到其他 conversation: messageId=${firstMessageId}, existing=${existing.id}, current=${conversationId}`);
+      return false;
+    }
+
+    this.db.run(
+      `UPDATE sessions SET first_message_id = ?, last_active_at = ? WHERE id = ? AND env = ?`,
+      [firstMessageId, new Date().toISOString(), conversationId, this.env],
+    );
+    return true;
+  }
+
   /** 更新 session 最后活跃时间 */
   touchSession(sessionId: string): void {
     this.db.run(

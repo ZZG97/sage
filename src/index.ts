@@ -51,7 +51,7 @@ class Application {
           ? (text: string) => this.sageCore.sendProactiveMessage(ownerOpenId, text)
           : undefined,
         runAgentTask: ownerOpenId
-          ? (prompt: string) => this.sageCore.runAgentForOwner(prompt, ownerOpenId)
+          ? (prompt: string, title?: string) => this.sageCore.runAgentForOwner(prompt, ownerOpenId, title)
           : undefined,
       }, isDev);
       if (!ownerOpenId) {
@@ -114,6 +114,7 @@ class Application {
         const task = await this.scheduler.createDynamicTask({
           kind,
           message: content,
+          title: body.title ?? body.topic,
           pattern: body.pattern,
           triggerAt: body.triggerAt,
         });
