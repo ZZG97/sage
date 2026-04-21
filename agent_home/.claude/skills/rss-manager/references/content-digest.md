@@ -14,6 +14,13 @@ The script:
 
 - Reads feed URLs from `~/.rsshub/feeds.txt` or skill-local `feeds.txt`.
 - Fetches all RSS feeds.
+- Preserves feed-level and item-level metadata when present, including `source_title`, `source_link`,
+  `source_description`, `source_author`, `source_contact`, `item_author`, plus a best-effort `author` fallback and
+  `author_source`.
+- Rate-limits Weibo feeds by default: `RSS_WEIBO_FETCH_DELAY_SECONDS=30` with
+  `RSS_WEIBO_FETCH_JITTER_SECONDS=5`, so each interval is 25-35s by default; after
+  `RSS_WEIBO_MAX_CONSECUTIVE_FAILURES=3` consecutive Weibo failures, skips remaining Weibo feeds for the current run and
+  continues later non-Weibo feeds.
 - Deduplicates against `data/pushed.csv` using `guid`.
 - Writes chunk files, 10 items per chunk, to `data/chunks/`.
 - Outputs absolute chunk file paths to stdout, one per line.
@@ -41,7 +48,8 @@ For each item, extract:
 - Why it might matter to the user.
 - Whether it suggests an action, follow-up, or watch item.
 
-Before attribution, prefer explicit display names from item title/description/author metadata. For Zhihu people feeds, use
+Before attribution, prefer `author`, then raw `item_author` / `source_author` / `source_title`, then explicit display names
+that appear in item title/description/content. For Zhihu people feeds, use
 `references/zhihu-followees.md` and its canonical inventory to map `url_token` to `name` when item content is not explicit.
 Use skill-local `references/source-aliases.md` only for exceptions not derivable from content or canonical inventories.
 RSSHub feed paths, Zhihu slugs, numeric Xueqiu ids, and X/Twitter handles may not equal the public display name.
@@ -103,7 +111,7 @@ Use this structure:
 后续动作
 - Concrete next action if any.
 
-来源: X 个订阅源 | 新增: Y 条 | 失败: Z 个源
+来源: X 个订阅源 | 新增: Y 条 | 失败: Z 个源 | 跳过: K 个源
 ```
 
 Skip empty sections. If there are only a few items, use short prose instead of a rigid report.
@@ -111,6 +119,8 @@ Skip empty sections. If there are only a few items, use short prose instead of a
 ## Error Handling
 
 - Partial feed fetch failure: log and continue; mention failed count.
+- Skipped Weibo feeds due to consecutive failures are protective throttling, not "no content"; mention skipped count when
+  present.
 - All feed fetches fail: report failure explicitly.
 - Subagent or inline analysis fails: include affected source/title and mark `分析失败`.
 - Never say "no new content" when fetching failed.

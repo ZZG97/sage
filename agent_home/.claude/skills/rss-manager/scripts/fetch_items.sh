@@ -21,6 +21,10 @@ PUSHED_CSV="$DATA_DIR/pushed.csv"
 BATCH_SIZE=10
 LOCK_DIR="$DATA_DIR/.rss_reader.lock"
 TEMP_FILE=""
+FEED_DELAY_SECONDS="${RSS_FEED_DELAY_SECONDS:-0}"
+WEIBO_DELAY_SECONDS="${RSS_WEIBO_FETCH_DELAY_SECONDS:-30}"
+WEIBO_DELAY_JITTER_SECONDS="${RSS_WEIBO_FETCH_JITTER_SECONDS:-5}"
+WEIBO_MAX_CONSECUTIVE_FAILURES="${RSS_WEIBO_MAX_CONSECUTIVE_FAILURES:-3}"
 
 cleanup() {
     if [[ -n "${TEMP_FILE:-}" && -f "$TEMP_FILE" ]]; then
@@ -33,6 +37,35 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$DATA_DIR"
+
+is_weibo_feed() {
+    [[ "$1" == *"/weibo/"* ]]
+}
+
+sleep_if_needed() {
+    local seconds="$1"
+    if [[ "$seconds" != "0" && "$seconds" != "0.0" ]]; then
+        sleep "$seconds"
+    fi
+}
+
+sleep_weibo_interval() {
+    local base_seconds="$1"
+    local jitter_seconds="$2"
+    local seconds="$base_seconds"
+    local delta=0
+
+    if [[ "$base_seconds" =~ ^[0-9]+$ && "$jitter_seconds" =~ ^[0-9]+$ && "$jitter_seconds" -gt 0 ]]; then
+        delta=$((RANDOM % (jitter_seconds * 2 + 1) - jitter_seconds))
+        seconds=$((base_seconds + delta))
+        if [[ "$seconds" -lt 0 ]]; then
+            seconds=0
+        fi
+    fi
+
+    echo "Rate limiting Weibo: sleep ${seconds}s (base=${base_seconds}s jitter=${delta}s)" >&2
+    sleep_if_needed "$seconds"
+}
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     echo "ERROR: Another RSS reader run is in progress" >&2
@@ -58,62 +91,7 @@ fi
 mkdir -p "$CHUNKS_DIR"
 rm -f "$CHUNKS_DIR"/chunk_*.jsonl
 
-# Build Python script for fetching
-FETCH_SCRIPT=$(cat << 'PYEOF'
-import sys
-import xml.etree.ElementTree as ET
-import re
-import html
-import json
-import urllib.request
-
-url = sys.argv[1]
-
-try:
-    with urllib.request.urlopen(url, timeout=30) as response:
-        content_bytes = response.read()
-        encoding = response.headers.get_content_charset() or "utf-8"
-        content = content_bytes.decode(encoding, errors='replace')
-
-    root = ET.fromstring(content)
-    channel = root.find('channel')
-    if channel is None:
-        sys.exit(0)
-
-    for item in channel.findall('item'):
-        title_elem = item.find('title')
-        link_elem = item.find('link')
-        guid_elem = item.find('guid')
-        desc_elem = item.find('description')
-        pubdate_elem = item.find('pubDate')
-
-        title = html.unescape(title_elem.text.strip()) if title_elem is not None and title_elem.text else ""
-        link = link_elem.text.strip() if link_elem is not None and link_elem.text else ""
-        guid = guid_elem.text.strip() if guid_elem is not None and guid_elem.text else link
-        pubdate = pubdate_elem.text if pubdate_elem is not None and pubdate_elem.text else ""
-
-        desc_text = ""
-        if desc_elem is not None and desc_elem.text:
-            desc_text = re.sub(r'<[^>]+>', '', desc_elem.text)
-            desc_text = html.unescape(desc_text.strip())[:500]
-
-        if not guid:
-            guid = f"{title[:50]}_{pubdate}"
-
-        record = {
-            "title": title,
-            "link": link,
-            "guid": guid,
-            "description": desc_text,
-            "pubDate": pubdate,
-            "feed_url": url
-        }
-        print(json.dumps(record, ensure_ascii=False))
-except Exception as e:
-    print(f"Error fetching {url}: {e}", file=sys.stderr)
-    sys.exit(1)
-PYEOF
-)
+FETCH_FEED_SCRIPT="$SCRIPT_DIR/fetch_feed_items.py"
 
 # Fetch all feeds into temp file
 TEMP_FILE=$(mktemp)
@@ -122,6 +100,10 @@ TEMP_FILE=$(mktemp)
 total_feeds=0
 successful_feeds=0
 failed_feeds=0
+skipped_feeds=0
+weibo_fetches=0
+weibo_consecutive_failures=0
+skip_remaining_weibo=0
 
 while IFS= read -r line; do
     [[ "$line" =~ ^# ]] && continue
@@ -131,11 +113,42 @@ while IFS= read -r line; do
     [[ -z "$URL" ]] && continue
 
     ((total_feeds += 1))
+    is_weibo=false
+    if is_weibo_feed "$URL"; then
+        is_weibo=true
+    fi
+
+    if [[ "$is_weibo" == true && "$skip_remaining_weibo" -eq 1 ]]; then
+        ((skipped_feeds += 1))
+        continue
+    fi
+
+    if [[ "$is_weibo" == true ]]; then
+        if [[ "$weibo_fetches" -gt 0 ]]; then
+            sleep_weibo_interval "$WEIBO_DELAY_SECONDS" "$WEIBO_DELAY_JITTER_SECONDS"
+        fi
+        ((weibo_fetches += 1))
+    elif [[ "$total_feeds" -gt 1 ]]; then
+        sleep_if_needed "$FEED_DELAY_SECONDS"
+    fi
+
     echo "Fetching: $URL" >&2
-    if python3 -c "$FETCH_SCRIPT" "$URL" >> "$TEMP_FILE"; then
+    if python3 "$FETCH_FEED_SCRIPT" "$URL" >> "$TEMP_FILE"; then
         ((successful_feeds += 1))
+        if [[ "$is_weibo" == true ]]; then
+            weibo_consecutive_failures=0
+        fi
     else
+        fetch_rc=$?
         ((failed_feeds += 1))
+        if [[ "$is_weibo" == true ]]; then
+            ((weibo_consecutive_failures += 1))
+            echo "WARN: Weibo feed failed (consecutive=$weibo_consecutive_failures rc=$fetch_rc): $URL" >&2
+            if [[ "$WEIBO_MAX_CONSECUTIVE_FAILURES" -gt 0 && "$weibo_consecutive_failures" -ge "$WEIBO_MAX_CONSECUTIVE_FAILURES" ]]; then
+                skip_remaining_weibo=1
+                echo "WARN: Skipping remaining Weibo feeds for this run after $weibo_consecutive_failures consecutive failures" >&2
+            fi
+        fi
     fi
 done < "$FEEDS_FILE"
 
@@ -218,4 +231,4 @@ if [[ $dedup_rc -ne 0 ]]; then
     exit $dedup_rc
 fi
 
-echo "FETCH_SUMMARY: total=$total_feeds ok=$successful_feeds failed=$failed_feeds" >&2
+echo "FETCH_SUMMARY: total=$total_feeds ok=$successful_feeds failed=$failed_feeds skipped=$skipped_feeds" >&2

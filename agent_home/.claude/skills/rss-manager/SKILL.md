@@ -42,7 +42,10 @@ CHUNKS=$(./.claude/skills/rss-manager/scripts/fetch_items.sh)
 ```
 
 The script reads feeds from `~/.rsshub/feeds.txt` first, then skill-local `feeds.txt`, deduplicates against
-`data/pushed.csv`, and writes JSONL chunks to `data/chunks/`.
+`data/pushed.csv`, and writes JSONL chunks to `data/chunks/`. Weibo feeds are rate-limited by default:
+`RSS_WEIBO_FETCH_DELAY_SECONDS=30` with `RSS_WEIBO_FETCH_JITTER_SECONDS=5` random jitter, so each interval is 25-35s by
+default. `RSS_WEIBO_MAX_CONSECUTIVE_FAILURES=3` skips remaining Weibo feeds for the current run after consecutive failures
+while continuing later non-Weibo feeds.
 
 ## Error Handling
 
