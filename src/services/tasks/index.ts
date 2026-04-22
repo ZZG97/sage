@@ -34,7 +34,6 @@ export function getBuiltinTasks(): BuiltinTaskDef[] {
       name: 'system-prompt-sync',
       pattern: '10 3 * * *',     // 每天 03:10 同步 Claude Code / Codex 系统提示
       handler: syncSystemPrompts,
-      allowInDev: true,
     },
   ];
 }

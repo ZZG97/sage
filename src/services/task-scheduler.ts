@@ -30,6 +30,12 @@ export interface BuiltinTaskDef {
   allowInDev?: boolean;
 }
 
+export interface BuiltinTaskSummary {
+  name: string;
+  pattern: string;
+  allowInDev: boolean;
+}
+
 /** A dynamic scheduled task stored in SQLite */
 export interface DynamicTask {
   id: string;
@@ -70,6 +76,7 @@ export class TaskScheduler {
   private queue: Queue<TaskJobData>;
   private worker: Worker<TaskJobData> | undefined;
   private builtinHandlers: Map<string, TaskHandler> = new Map();
+  private builtinDefs: Map<string, BuiltinTaskSummary> = new Map();
   private ctx: TaskContext;
   private db: Database;
   private logger: Logger;
@@ -123,6 +130,11 @@ export class TaskScheduler {
       return;
     }
     this.builtinHandlers.set(def.name, def.handler);
+    this.builtinDefs.set(def.name, {
+      name: def.name,
+      pattern: def.pattern,
+      allowInDev: Boolean(def.allowInDev),
+    });
     this.logger.info(`注册内置任务: ${def.name} (${def.pattern})`);
   }
 
@@ -132,6 +144,11 @@ export class TaskScheduler {
     for (const def of builtinDefs) {
       if (this.isDev && !def.allowInDev) continue;
       this.builtinHandlers.set(def.name, def.handler);
+      this.builtinDefs.set(def.name, {
+        name: def.name,
+        pattern: def.pattern,
+        allowInDev: Boolean(def.allowInDev),
+      });
 
       await this.queue.upsertJobScheduler(
         `builtin:${def.name}`,
@@ -243,6 +260,11 @@ export class TaskScheduler {
     return this.db.query(
       "SELECT * FROM dynamic_tasks WHERE status = 'active' ORDER BY created_at DESC",
     ).all() as DynamicTask[];
+  }
+
+  /** List registered built-in tasks */
+  listBuiltinTasks(): BuiltinTaskSummary[] {
+    return Array.from(this.builtinDefs.values()).sort((a, b) => a.name.localeCompare(b.name));
   }
 
   /** Remove a dynamic task */

@@ -5,12 +5,14 @@ import { createDebugRoutes } from './debug/routes';
 import { createHealthRoutes } from './health/routes';
 import { createManagementRoutes } from './management/routes';
 import type { SageCore } from '../services/core';
+import type { TaskScheduler } from '../services/task-scheduler';
 
 const logger = new Logger('Apps');
 
 /** App 上下文，由 WebServer 传入 */
 export interface AppContext {
   sageCore: SageCore;
+  scheduler: TaskScheduler;
 }
 
 interface AppDefinition {
@@ -23,7 +25,7 @@ interface AppDefinition {
 const apps: AppDefinition[] = [
   { name: 'debug', path: '/apps/debug', createRoutes: () => createDebugRoutes() },
   { name: 'health', path: '/apps/health', createRoutes: () => createHealthRoutes() },
-  { name: 'management', path: '/apps/management', createRoutes: (ctx) => createManagementRoutes(ctx.sageCore) },
+  { name: 'management', path: '/apps/management', createRoutes: (ctx) => createManagementRoutes(ctx.sageCore, ctx.scheduler) },
 ];
 
 /** 将所有 App 路由挂载到主 Hono 实例 */

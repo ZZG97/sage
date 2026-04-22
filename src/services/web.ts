@@ -3,6 +3,7 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { serveStatic } from 'hono/bun';
 import { SageCore } from '../services/core';
+import type { TaskScheduler } from '../services/task-scheduler';
 import { AppError, Logger } from '../utils';
 import { appConfig } from '../config';
 import { mountApps } from '../apps';
@@ -16,7 +17,7 @@ export class WebServer {
   private host: string;
   private logger = new Logger('WebServer');
 
-  constructor(sageCore: SageCore) {
+  constructor(sageCore: SageCore, scheduler: TaskScheduler) {
     this.sageCore = sageCore;
     this.port = appConfig.server.port;
     this.host = appConfig.server.host;
@@ -24,7 +25,7 @@ export class WebServer {
     this.app = new Hono();
     this.setupMiddleware();
     this.setupRoutes();
-    mountApps(this.app, { sageCore });
+    mountApps(this.app, { sageCore, scheduler });
     this.setupStaticServing();
     this.setupErrorHandling();
   }
@@ -147,6 +148,7 @@ export class WebServer {
       const serveIndex = serveStatic({ root: './web/dist', path: '/index.html' });
       this.app.get('/', serveIndex);
       this.app.get('/management', serveIndex);
+      this.app.get('/scheduler', serveIndex);
       this.app.get('/health-dashboard', serveIndex);
       this.app.get('/debug', serveIndex);
 

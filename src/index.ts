@@ -39,7 +39,6 @@ class Application {
 
       // 创建核心服务
       this.sageCore = new SageCore(agent, this.historyStore);
-      this.webServer = new WebServer(this.sageCore);
 
       // 创建调度器（bunqueue-based）
       const isDev = env === 'dev';
@@ -58,7 +57,10 @@ class Application {
         logger.warn('OWNER_OPEN_ID 未配置，主动消息功能不可用');
       }
 
-      // 注册 API 路由
+      // Web server 依赖 app context（含 scheduler）
+      this.webServer = new WebServer(this.sageCore, this.scheduler);
+
+      // 兼容旧 scheduler skill，保留根路径别名
       this.setupSchedulerRoutes();
 
       // 启动

@@ -3,6 +3,7 @@ import { clsx } from 'clsx';
 
 const navItems = [
   { to: '/management', label: 'Management' },
+  { to: '/scheduler', label: 'Scheduler' },
   { to: '/health-dashboard', label: 'Health' },
   { to: '/debug', label: 'Debug' },
 ];

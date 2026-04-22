@@ -50,6 +50,54 @@ export const management = {
     }),
 };
 
+// ─── Scheduler API ───
+
+export interface BuiltinTask {
+  name: string;
+  pattern: string;
+  allowInDev: boolean;
+}
+
+export interface DynamicTask {
+  id: string;
+  kind: 'message' | 'agent';
+  message: string;
+  title: string | null;
+  pattern: string | null;
+  trigger_at: number | null;
+  status: string;
+  created_at: number;
+}
+
+export interface CreateDynamicTaskInput {
+  kind?: 'message' | 'agent';
+  message?: string;
+  prompt?: string;
+  title?: string;
+  topic?: string;
+  pattern?: string;
+  triggerAt?: number;
+}
+
+export const schedulerApi = {
+  getBuiltinTasks: () => request<{ tasks: BuiltinTask[] }>('/apps/management/scheduler/builtin'),
+  runBuiltinTask: (name: string) =>
+    request<{ success: boolean; task: string }>(`/apps/management/scheduler/builtin/${encodeURIComponent(name)}/run`, {
+      method: 'POST',
+    }),
+  getDynamicTasks: (all = false) =>
+    request<{ tasks: DynamicTask[] }>(`/apps/management/scheduler/tasks${all ? '?all=true' : ''}`),
+  createDynamicTask: (input: CreateDynamicTaskInput) =>
+    request<{ success: boolean; task: DynamicTask }>('/apps/management/scheduler/tasks', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  deleteDynamicTask: (id: string) =>
+    request<{ success: boolean }>(`/apps/management/scheduler/tasks/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
+};
+
 // ─── Health API ───
 
 export interface HealthStats {
