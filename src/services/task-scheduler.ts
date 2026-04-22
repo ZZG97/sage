@@ -122,7 +122,7 @@ interface WorkflowStepRunRecord {
 
 const QUEUE_NAME = 'sage:tasks';
 const TIMEZONE = 'Asia/Shanghai';
-const DEFAULT_SHELL_TIMEOUT_SEC = 30 * 60;
+const DEFAULT_SHELL_TIMEOUT_SEC = 60 * 60;
 const PREVIEW_CHAR_LIMIT = 1200;
 
 async function streamToText(stream: ReadableStream<Uint8Array> | null): Promise<string> {
