@@ -5,6 +5,7 @@ import {
   schedulerApi,
   type BuiltinTask,
   type DynamicTask,
+  type WorkflowPayload,
 } from '@/lib/api';
 import { useQuery } from '@/lib/hooks';
 import { Card, CardTitle, StatValue } from '@/components/Card';
@@ -17,18 +18,32 @@ function formatTimestamp(timestamp: number | null): string {
 }
 
 function KindBadge({ kind }: { kind: DynamicTask['kind'] }) {
+  const className =
+    kind === 'agent'
+      ? 'bg-[var(--color-primary)]/15 text-[var(--color-primary-light)]'
+      : kind === 'workflow'
+        ? 'bg-[var(--color-success)]/15 text-[var(--color-success)]'
+        : 'bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]';
+
+  const label =
+    kind === 'agent'
+      ? 'Agent'
+      : kind === 'workflow'
+        ? 'Workflow'
+        : 'Message';
+
   return (
-    <span
-      className={clsx(
-        'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium',
-        kind === 'agent'
-          ? 'bg-[var(--color-primary)]/15 text-[var(--color-primary-light)]'
-          : 'bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]',
-      )}
-    >
-      {kind === 'agent' ? 'Agent' : 'Message'}
+    <span className={clsx('inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium', className)}>
+      {label}
     </span>
   );
+}
+
+function formatWorkflowStep(step: WorkflowPayload['steps'][number], index: number): string {
+  if (step.kind === 'shell') {
+    return `${index + 1}. shell: ${step.command}`;
+  }
+  return `${index + 1}. agent: ${step.prompt}`;
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -107,6 +122,18 @@ function DynamicTaskCard({
             <div className="mt-3 text-sm text-[var(--color-text-secondary)]">Title: {task.title}</div>
           )}
           <div className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{task.message}</div>
+          {task.kind === 'workflow' && task.payload && (
+            <div className="mt-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-hover)]/40 p-3">
+              <div className="text-xs uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">Workflow Steps</div>
+              <div className="mt-2 space-y-2 text-sm leading-6">
+                {task.payload.steps.map((step, index) => (
+                  <div key={`${task.id}-${index}`} className="whitespace-pre-wrap break-words">
+                    {formatWorkflowStep(step, index)}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--color-text-secondary)]">
             <span>{scheduleLabel}</span>
             <span>Created: {formatTimestamp(task.created_at)}</span>
@@ -132,6 +159,24 @@ export function SchedulerPage() {
   const [scheduleMode, setScheduleMode] = useState<ScheduleMode>('cron');
   const [message, setMessage] = useState('');
   const [title, setTitle] = useState('');
+  const [workflowSpec, setWorkflowSpec] = useState(`{
+  "version": 1,
+  "steps": [
+    {
+      "id": "fetch",
+      "kind": "shell",
+      "command": "./.claude/skills/rss-manager/scripts/fetch_items.sh",
+      "cwd": "~/workspace/sage/agent_home",
+      "timeoutSec": 2400
+    },
+    {
+      "id": "digest",
+      "kind": "agent",
+      "title": "RSS 定时摘要",
+      "prompt": "基于 workflow 上下文中的抓取结果做中文摘要，不要重新抓取。"
+    }
+  ]
+}`);
   const [pattern, setPattern] = useState('0 9 * * 1-5');
   const [triggerAt, setTriggerAt] = useState(dayjs().add(1, 'hour').format('YYYY-MM-DDTHH:mm'));
   const [submitting, setSubmitting] = useState(false);
@@ -159,21 +204,38 @@ export function SchedulerPage() {
     visible: dynamicTasks.length,
     active: dynamicTasks.filter((task) => task.status === 'active').length,
     agent: dynamicTasks.filter((task) => task.kind === 'agent').length,
+    workflow: dynamicTasks.filter((task) => task.kind === 'workflow').length,
   };
 
   const handleCreateTask = async (e: FormEvent) => {
     e.preventDefault();
 
     const content = message.trim();
-    if (!content) {
+    if (kind !== 'workflow' && !content) {
       alert('message / prompt 不能为空');
       return;
     }
 
-    const payload =
-      kind === 'agent'
-        ? { kind, prompt: content, title: title.trim() || undefined }
-        : { kind, message: content };
+    let payload: Record<string, unknown>;
+    if (kind === 'workflow') {
+      let workflow: WorkflowPayload;
+      try {
+        workflow = JSON.parse(workflowSpec) as WorkflowPayload;
+      } catch {
+        alert('workflow JSON 解析失败');
+        return;
+      }
+      payload = {
+        kind,
+        title: title.trim() || undefined,
+        description: content || undefined,
+        workflow,
+      };
+    } else if (kind === 'agent') {
+      payload = { kind, prompt: content, title: title.trim() || undefined };
+    } else {
+      payload = { kind, message: content };
+    }
 
     if (scheduleMode === 'cron') {
       if (!pattern.trim()) {
@@ -196,7 +258,7 @@ export function SchedulerPage() {
         triggerAt: scheduleMode === 'oneshot' ? dayjs(triggerAt).valueOf() : undefined,
       });
       setMessage('');
-      if (kind === 'agent') setTitle('');
+      if (kind === 'agent' || kind === 'workflow') setTitle('');
       await refetchDynamic();
     } catch (err: any) {
       alert(err.message || '创建任务失败');
@@ -236,7 +298,7 @@ export function SchedulerPage() {
         <div>
           <h2 className="text-xl font-bold">Scheduler</h2>
           <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-            管理内置任务和动态提醒；动态任务支持纯文本提醒与 agent 主动执行两种模式。
+            管理内置任务和动态提醒；动态任务支持 message、agent 与 workflow 三种模式。
           </p>
         </div>
         <div className="flex gap-2">
@@ -274,10 +336,10 @@ export function SchedulerPage() {
           <StatValue value={stats.active} label="Active Dynamic" />
         </Card>
         <Card>
-          <StatValue value={stats.visible} label={showAll ? 'Visible Tasks' : 'Loaded Active'} />
+          <StatValue value={stats.agent} label="Agent Tasks" />
         </Card>
         <Card>
-          <StatValue value={stats.agent} label="Agent Tasks" />
+          <StatValue value={stats.workflow} label="Workflow Tasks" />
         </Card>
       </div>
 
@@ -295,6 +357,7 @@ export function SchedulerPage() {
                 >
                   <option value="message">Message</option>
                   <option value="agent">Agent</option>
+                  <option value="workflow">Workflow</option>
                 </select>
               </label>
 
@@ -311,7 +374,7 @@ export function SchedulerPage() {
               </label>
             </div>
 
-            {kind === 'agent' && (
+            {(kind === 'agent' || kind === 'workflow') && (
               <label className="block">
                 <div className="mb-2 text-sm text-[var(--color-text-secondary)]">Title</div>
                 <input
@@ -325,20 +388,37 @@ export function SchedulerPage() {
 
             <label className="block">
               <div className="mb-2 text-sm text-[var(--color-text-secondary)]">
-                {kind === 'agent' ? 'Prompt' : 'Message'}
+                {kind === 'agent' ? 'Prompt' : kind === 'workflow' ? 'Description (Optional)' : 'Message'}
               </div>
               <textarea
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
-                rows={6}
+                rows={kind === 'workflow' ? 3 : 6}
                 placeholder={
                   kind === 'agent'
                     ? '例如：帮我总结今天的工作，并列出明天最重要的三件事'
+                    : kind === 'workflow'
+                      ? '例如：先抓 RSS，再让 agent 汇总；不填则自动根据 workflow 生成摘要'
                     : '例如：17:30 出门，别忘了带电脑电源'
                 }
                 className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm leading-6 text-[var(--color-text)] outline-none placeholder:text-[var(--color-text-secondary)]"
               />
             </label>
+
+            {kind === 'workflow' && (
+              <label className="block">
+                <div className="mb-2 text-sm text-[var(--color-text-secondary)]">Workflow JSON</div>
+                <textarea
+                  value={workflowSpec}
+                  onChange={(e) => setWorkflowSpec(e.target.value)}
+                  rows={16}
+                  className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 font-mono text-sm leading-6 text-[var(--color-text)] outline-none"
+                />
+                <div className="mt-2 text-xs text-[var(--color-text-secondary)]">
+                  当前仅支持线性 steps；step.kind 只支持 `shell` 与 `agent`。
+                </div>
+              </label>
+            )}
 
             {scheduleMode === 'cron' ? (
               <label className="block">

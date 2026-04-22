@@ -47,6 +47,14 @@ The script reads feeds from `~/.rsshub/feeds.txt` first, then skill-local `feeds
 default. `RSS_WEIBO_MAX_CONSECUTIVE_FAILURES=3` skips remaining Weibo feeds for the current run after consecutive failures
 while continuing later non-Weibo feeds.
 
+Scheduler workflow integration (2026-04-22):
+
+- Manual/ad-hoc digest still starts from `fetch_items.sh` as above.
+- Sage scheduler may now run RSS as a `workflow`: step 1 shell runs `fetch_items.sh`, step 2 agent receives stdout/stderr,
+  chunk paths, and artifact file paths from the workflow context.
+- When the scheduler/workflow already provides fetch artifacts, do **not** rerun `fetch_items.sh`; analyze the provided
+  outputs directly and treat the fetch step as already completed.
+
 ## Error Handling
 
 - Do not expose cookie/token values from `.env`, RSSHub config, or browser sessions. Redact secrets in summaries.

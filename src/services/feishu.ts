@@ -34,6 +34,7 @@ export const CARD_SIZE_LIMIT = 28 * 1024;
 
 const MAX_TABLES_PER_CARD = 5;
 const MARKDOWN_TABLE_REGEX = /^\|.+\|[ \t]*\n\|[\s:|-]+\|[ \t]*\n(?:\|.+\|[ \t]*\n?)+/gm;
+const MARKDOWN_IMAGE_REGEX = /!\[([^\]]*)\]\(([^)]+)\)/g;
 
 /** 按表格数量拆分 markdown，每块最多 maxTables 个表格 */
 export function splitMarkdownByTables(markdown: string, maxTables: number = MAX_TABLES_PER_CARD): string[] {
@@ -63,6 +64,25 @@ export function splitMarkdownByTables(markdown: string, maxTables: number = MAX_
   const remaining = markdown.slice(chunkStart).trim();
   if (remaining) chunks.push(remaining);
   return chunks;
+}
+
+function isRemoteImageSource(src: string): boolean {
+  return src.startsWith('http://') || src.startsWith('https://') || src.startsWith('img_');
+}
+
+/**
+ * 飞书卡片 markdown 中，图片语法只接受 URL 或飞书 image_key。
+ * 本地绝对/相对路径会被当作 image_key 校验并触发 400。
+ * 流式阶段先降级成普通文本，最终阶段再走 uploadImage() 替换。
+ */
+function sanitizeCardMarkdown(markdown: string): string {
+  return markdown.replace(MARKDOWN_IMAGE_REGEX, (_full, altText: string, src: string) => {
+    if (isRemoteImageSource(src)) return _full;
+
+    const label = altText?.trim() || '图片';
+    const displayPath = path.isAbsolute(src) ? src : path.normalize(src);
+    return `**${label}**: \`${displayPath}\``;
+  });
 }
 
 export class FeishuService {
@@ -527,7 +547,7 @@ export class FeishuService {
     if (displayText) {
       elements.push({
         tag: 'markdown',
-        content: displayText,
+        content: sanitizeCardMarkdown(displayText),
       });
     }
 
@@ -648,14 +668,12 @@ export class FeishuService {
 
   /** 处理最终回复中的本地图片：上传替换为 image_key */
   async processImagesInMarkdown(text: string): Promise<string> {
-    const imageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
     let result = text;
-    const matches = [...text.matchAll(imageRegex)];
+    const matches = [...text.matchAll(MARKDOWN_IMAGE_REGEX)];
 
     for (const match of matches) {
       const [full, alt, src] = match;
-      // 跳过已经是 image_key 或 URL 的
-      if (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('img_')) continue;
+      if (isRemoteImageSource(src)) continue;
 
       try {
         const imageKey = await this.uploadImage(src);

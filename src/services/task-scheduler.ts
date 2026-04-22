@@ -2,6 +2,7 @@
 // Replaces the old setInterval-based Scheduler
 import { Queue, Worker } from 'bunqueue/client';
 import { Database } from 'bun:sqlite';
+import { mkdirSync } from 'fs';
 import { resolve } from 'path';
 import { Logger } from '../utils';
 import type { AgentProvider } from '../agent/types';
@@ -36,15 +37,42 @@ export interface BuiltinTaskSummary {
   allowInDev: boolean;
 }
 
+export type DynamicTaskKind = 'message' | 'agent' | 'workflow';
+export type WorkflowStepKind = 'shell' | 'agent';
+
+export interface WorkflowShellStep {
+  id?: string;
+  kind: 'shell';
+  command: string;
+  cwd?: string | null;
+  timeoutSec?: number | null;
+}
+
+export interface WorkflowAgentStep {
+  id?: string;
+  kind: 'agent';
+  prompt: string;
+  title?: string | null;
+}
+
+export type WorkflowStep = WorkflowShellStep | WorkflowAgentStep;
+
+export interface WorkflowTaskPayload {
+  version: 1;
+  steps: WorkflowStep[];
+}
+
 /** A dynamic scheduled task stored in SQLite */
 export interface DynamicTask {
   id: string;
-  /** 'message' = 到点发一条纯文本；'agent' = 到点触发 agent 对话并渲染成流式卡片 */
-  kind: 'message' | 'agent';
-  /** kind='message' 时：要发送的文本；kind='agent' 时：作为 agent 的 prompt */
+  /** message=纯文本提醒；agent=单步 agent；workflow=顺序执行多个 step */
+  kind: DynamicTaskKind;
+  /** message 文本；agent prompt；workflow 的人类可读摘要 */
   message: string;
-  /** kind='agent' 时：主动任务根消息标题 */
+  /** agent / workflow 主标题 */
   title: string | null;
+  /** workflow 结构化定义 */
+  payload: WorkflowTaskPayload | null;
   /** Cron pattern (recurring) OR null for one-shot */
   pattern: string | null;
   /** Epoch ms for one-shot trigger time */
@@ -54,21 +82,154 @@ export interface DynamicTask {
   created_at: number;
 }
 
+interface RawDynamicTask extends Omit<DynamicTask, 'payload'> {
+  payload: string | null;
+}
+
 /** Job data flowing through bunqueue */
 interface TaskJobData {
   type: 'builtin' | 'dynamic';
   /** For builtin: task name; for dynamic: task id */
   task_id: string;
   /** For dynamic: kind */
-  kind?: 'message' | 'agent';
-  /** For dynamic: payload — text for 'message', prompt for 'agent' */
+  kind?: DynamicTaskKind;
+  /** For dynamic: text/prompt/summary */
   message?: string;
-  /** For dynamic agent: proactive topic text */
+  /** For dynamic agent/workflow: proactive topic text */
   title?: string;
+  /** For workflow: serialized payload */
+  payload?: string;
+}
+
+interface WorkflowStepRunRecord {
+  stepId: string;
+  kind: WorkflowStepKind;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  outputDir: string;
+  title?: string | null;
+  command?: string;
+  cwd?: string;
+  timeoutSec?: number;
+  exitCode?: number;
+  timedOut?: boolean;
+  stdoutPath?: string;
+  stderrPath?: string;
+  promptPath?: string;
+  preview?: string;
 }
 
 const QUEUE_NAME = 'sage:tasks';
 const TIMEZONE = 'Asia/Shanghai';
+const DEFAULT_SHELL_TIMEOUT_SEC = 30 * 60;
+const PREVIEW_CHAR_LIMIT = 1200;
+
+async function streamToText(stream: ReadableStream<Uint8Array> | null): Promise<string> {
+  if (!stream) return '';
+  return await new Response(stream).text();
+}
+
+function expandHomeDir(input?: string | null): string | undefined {
+  if (!input) return undefined;
+  if (input.startsWith('~')) {
+    return input.replace('~', process.env.HOME || '');
+  }
+  return input;
+}
+
+function truncateText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n...(${text.length - maxChars} chars truncated)`;
+}
+
+function tailText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `...(${text.length - maxChars} chars omitted)\n${text.slice(-maxChars)}`;
+}
+
+function sanitizePathSegment(input: string): string {
+  const cleaned = input
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return cleaned || 'step';
+}
+
+function formatRunTimestamp(date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    '_',
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+  ].join('');
+}
+
+function summarizeWorkflowPayload(payload: WorkflowTaskPayload): string {
+  return payload.steps
+    .map((step, index) => {
+      if (step.kind === 'shell') {
+        return `${index + 1}. shell: ${truncateText(step.command.replace(/\s+/g, ' '), 100)}`;
+      }
+      return `${index + 1}. agent: ${truncateText(step.prompt.replace(/\s+/g, ' '), 100)}`;
+    })
+    .join('\n');
+}
+
+function normalizeWorkflowPayload(input: unknown): WorkflowTaskPayload {
+  if (!input || typeof input !== 'object') {
+    throw new Error('workflow payload 必须是对象');
+  }
+
+  const raw = input as { version?: unknown; steps?: unknown };
+  if (!Array.isArray(raw.steps) || raw.steps.length === 0) {
+    throw new Error('workflow.steps 必须是非空数组');
+  }
+
+  const steps: WorkflowStep[] = raw.steps.map((candidate, index) => {
+    if (!candidate || typeof candidate !== 'object') {
+      throw new Error(`workflow.steps[${index}] 必须是对象`);
+    }
+
+    const step = candidate as Record<string, unknown>;
+    const id = typeof step.id === 'string' && step.id.trim()
+      ? step.id.trim()
+      : `step_${String(index + 1).padStart(2, '0')}`;
+
+    if (step.kind === 'shell') {
+      const command = typeof step.command === 'string' ? step.command.trim() : '';
+      if (!command) {
+        throw new Error(`workflow.steps[${index}].command 不能为空`);
+      }
+      const cwd = typeof step.cwd === 'string' && step.cwd.trim() ? step.cwd.trim() : null;
+      const timeoutSec = typeof step.timeoutSec === 'number' && Number.isFinite(step.timeoutSec)
+        ? Math.max(1, Math.floor(step.timeoutSec))
+        : null;
+      return { id, kind: 'shell', command, cwd, timeoutSec };
+    }
+
+    if (step.kind === 'agent') {
+      const prompt = typeof step.prompt === 'string' ? step.prompt.trim() : '';
+      if (!prompt) {
+        throw new Error(`workflow.steps[${index}].prompt 不能为空`);
+      }
+      const title = typeof step.title === 'string' && step.title.trim() ? step.title.trim() : null;
+      return { id, kind: 'agent', prompt, title };
+    }
+
+    throw new Error(`workflow.steps[${index}].kind 仅支持 shell / agent`);
+  });
+
+  return {
+    version: 1,
+    steps,
+  };
+}
 
 // ─── TaskScheduler ───────────────────────────────────────────────────────────
 
@@ -87,13 +248,11 @@ export class TaskScheduler {
     this.isDev = isDev;
     this.logger = new Logger('TaskScheduler');
 
-    // Init bunqueue
     this.queue = new Queue<TaskJobData>(QUEUE_NAME, {
       embedded: true,
     });
     this.queue.setStallConfig({ enabled: false });
 
-    // Init SQLite for dynamic tasks (dev uses separate DB to avoid cross-firing)
     const dbFile = isDev ? 'scheduler-dev.db' : 'scheduler.db';
     const dbPath = resolve(import.meta.dir, `../../data/${dbFile}`);
     this.db = new Database(dbPath, { create: true });
@@ -103,23 +262,29 @@ export class TaskScheduler {
         id TEXT PRIMARY KEY,
         message TEXT NOT NULL,
         title TEXT,
+        payload TEXT,
         pattern TEXT,
         trigger_at INTEGER,
         status TEXT NOT NULL DEFAULT 'active',
         created_at INTEGER NOT NULL
       )
     `);
-    // Migration: 加 kind 字段（默认 'message'，兼容老数据）
+
     const cols = this.db.query(`PRAGMA table_info(dynamic_tasks)`).all() as Array<{ name: string }>;
-    const hasKind = cols.some(c => c.name === 'kind');
+    const hasKind = cols.some((c) => c.name === 'kind');
     if (!hasKind) {
       this.db.exec(`ALTER TABLE dynamic_tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'message'`);
       this.logger.info('dynamic_tasks 表迁移：新增 kind 字段');
     }
-    const hasTitle = cols.some(c => c.name === 'title');
+    const hasTitle = cols.some((c) => c.name === 'title');
     if (!hasTitle) {
       this.db.exec(`ALTER TABLE dynamic_tasks ADD COLUMN title TEXT`);
       this.logger.info('dynamic_tasks 表迁移：新增 title 字段');
+    }
+    const hasPayload = cols.some((c) => c.name === 'payload');
+    if (!hasPayload) {
+      this.db.exec(`ALTER TABLE dynamic_tasks ADD COLUMN payload TEXT`);
+      this.logger.info('dynamic_tasks 表迁移：新增 payload 字段');
     }
   }
 
@@ -140,7 +305,6 @@ export class TaskScheduler {
 
   /** Start the scheduler — registers all jobs with bunqueue */
   async start(builtinDefs: BuiltinTaskDef[]): Promise<void> {
-    // 1. Register built-in cron tasks
     for (const def of builtinDefs) {
       if (this.isDev && !def.allowInDev) continue;
       this.builtinHandlers.set(def.name, def.handler);
@@ -158,10 +322,8 @@ export class TaskScheduler {
       this.logger.info(`注册内置任务: ${def.name} (${def.pattern})`);
     }
 
-    // 2. Reload dynamic tasks from DB
     await this.reloadDynamicTasks();
 
-    // 3. Start worker
     this.worker = new Worker<TaskJobData>(
       QUEUE_NAME,
       (job) => this.processJob(job),
@@ -194,44 +356,59 @@ export class TaskScheduler {
 
   /** Create a dynamic scheduled task (recurring or one-shot) */
   async createDynamicTask(opts: {
-    /** 任务类型：message=纯文本提醒，agent=触发 agent 对话 */
-    kind?: 'message' | 'agent';
-    /** kind='message' 时作为文本内容；kind='agent' 时作为 prompt */
+    kind?: DynamicTaskKind;
     message: string;
-    /** kind='agent' 时作为主动任务根消息标题 */
     title?: string;
-    /** Cron pattern for recurring, e.g. "30 9 * * 1-5" */
+    payload?: WorkflowTaskPayload;
     pattern?: string;
-    /** Epoch ms for one-shot trigger */
     triggerAt?: number;
   }): Promise<DynamicTask> {
     if (!opts.pattern && !opts.triggerAt) {
       throw new Error('Must provide either pattern (cron) or triggerAt (one-shot)');
     }
 
-    const kind: 'message' | 'agent' = opts.kind || 'message';
+    const kind: DynamicTaskKind = opts.kind || 'message';
+    const payload = kind === 'workflow' ? normalizeWorkflowPayload(opts.payload) : null;
+    const workflowSummary = payload ? summarizeWorkflowPayload(payload) : '';
+    const message = kind === 'workflow'
+      ? (opts.message.trim() || workflowSummary)
+      : opts.message.trim();
+
+    if (!message) {
+      throw new Error('message 不能为空');
+    }
+
     const id = crypto.randomUUID();
     const now = Date.now();
     const task: DynamicTask = {
       id,
       kind,
-      message: opts.message,
+      message,
       title: opts.title || null,
+      payload,
       pattern: opts.pattern || null,
       trigger_at: opts.triggerAt || null,
       status: 'active',
       created_at: now,
     };
 
-    // Persist to DB
     this.db.run(
-      `INSERT INTO dynamic_tasks (id, kind, message, title, pattern, trigger_at, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [task.id, task.kind, task.message, task.title, task.pattern, task.trigger_at, task.status, task.created_at],
+      `INSERT INTO dynamic_tasks (id, kind, message, title, payload, pattern, trigger_at, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        task.id,
+        task.kind,
+        task.message,
+        task.title,
+        task.payload ? JSON.stringify(task.payload) : null,
+        task.pattern,
+        task.trigger_at,
+        task.status,
+        task.created_at,
+      ],
     );
 
-    // Register with bunqueue
-    const jobData: TaskJobData = { type: 'dynamic', task_id: id, kind, message: opts.message, title: opts.title };
+    const jobData = this.buildDynamicJobData(task);
 
     if (opts.triggerAt) {
       const delay = opts.triggerAt - now;
@@ -239,7 +416,9 @@ export class TaskScheduler {
         throw new Error('triggerAt must be in the future');
       }
       await this.queue.add('task', jobData, { delay, jobId: `dynamic:${id}` });
-      this.logger.info(`创建一次性任务(${kind}): ${id}, 将在 ${new Date(opts.triggerAt).toLocaleString('zh-CN', { timeZone: TIMEZONE })} 触发`);
+      this.logger.info(
+        `创建一次性任务(${kind}): ${id}, 将在 ${new Date(opts.triggerAt).toLocaleString('zh-CN', { timeZone: TIMEZONE })} 触发`,
+      );
     } else if (opts.pattern) {
       await this.queue.upsertJobScheduler(
         `dynamic:${id}`,
@@ -254,12 +433,11 @@ export class TaskScheduler {
 
   /** List all dynamic tasks */
   listDynamicTasks(includeCompleted = false): DynamicTask[] {
-    if (includeCompleted) {
-      return this.db.query('SELECT * FROM dynamic_tasks ORDER BY created_at DESC').all() as DynamicTask[];
-    }
-    return this.db.query(
-      "SELECT * FROM dynamic_tasks WHERE status = 'active' ORDER BY created_at DESC",
-    ).all() as DynamicTask[];
+    const sql = includeCompleted
+      ? 'SELECT * FROM dynamic_tasks ORDER BY created_at DESC'
+      : "SELECT * FROM dynamic_tasks WHERE status = 'active' ORDER BY created_at DESC";
+    const rows = this.db.query(sql).all() as RawDynamicTask[];
+    return rows.map((row) => this.deserializeDynamicTask(row));
   }
 
   /** List registered built-in tasks */
@@ -269,17 +447,15 @@ export class TaskScheduler {
 
   /** Remove a dynamic task */
   async removeDynamicTask(id: string): Promise<boolean> {
-    const task = this.db.query('SELECT * FROM dynamic_tasks WHERE id = ?').get(id) as DynamicTask | null;
+    const task = this.getRawDynamicTaskById(id);
     if (!task) return false;
 
-    // Remove from bunqueue
     if (task.pattern) {
       try { await this.queue.removeJobScheduler(`dynamic:${id}`); } catch { /* may not exist */ }
     } else {
       try { await this.queue.removeAsync(`dynamic:${id}`); } catch { /* may have fired */ }
     }
 
-    // Update DB
     this.db.run("UPDATE dynamic_tasks SET status = 'cancelled' WHERE id = ?", [id]);
     this.logger.info(`删除动态任务: ${id}`);
     return true;
@@ -297,27 +473,52 @@ export class TaskScheduler {
 
   // ─── Internal ──────────────────────────────────────────────────────────────
 
+  private buildDynamicJobData(task: DynamicTask): TaskJobData {
+    return {
+      type: 'dynamic',
+      task_id: task.id,
+      kind: task.kind,
+      message: task.message,
+      title: task.title || undefined,
+      payload: task.payload ? JSON.stringify(task.payload) : undefined,
+    };
+  }
+
+  private getRawDynamicTaskById(id: string): RawDynamicTask | null {
+    return this.db.query('SELECT * FROM dynamic_tasks WHERE id = ?').get(id) as RawDynamicTask | null;
+  }
+
+  private deserializeDynamicTask(raw: RawDynamicTask): DynamicTask {
+    let payload: WorkflowTaskPayload | null = null;
+    if (raw.payload) {
+      try {
+        payload = normalizeWorkflowPayload(JSON.parse(raw.payload));
+      } catch (error) {
+        this.logger.warn(`dynamic task payload 解析失败: id=${raw.id}, error=${String(error)}`);
+      }
+    }
+    return {
+      ...raw,
+      kind: (raw.kind || 'message') as DynamicTaskKind,
+      payload,
+    };
+  }
+
   /** Reload active dynamic tasks from SQLite into bunqueue */
   private async reloadDynamicTasks(): Promise<void> {
-    const tasks = this.db.query(
+    const rows = this.db.query(
       "SELECT * FROM dynamic_tasks WHERE status = 'active'",
-    ).all() as DynamicTask[];
+    ).all() as RawDynamicTask[];
 
     const now = Date.now();
     let loaded = 0;
 
-    for (const task of tasks) {
-      const jobData: TaskJobData = {
-        type: 'dynamic',
-        task_id: task.id,
-        kind: task.kind || 'message',
-        message: task.message,
-        title: task.title || undefined,
-      };
+    for (const row of rows) {
+      const task = this.deserializeDynamicTask(row);
+      const jobData = this.buildDynamicJobData(task);
 
       if (task.trigger_at) {
         if (task.trigger_at <= now) {
-          // Expired one-shot — mark completed
           this.db.run("UPDATE dynamic_tasks SET status = 'completed' WHERE id = ?", [task.id]);
           continue;
         }
@@ -340,7 +541,7 @@ export class TaskScheduler {
 
   /** Process a job from the queue */
   private async processJob(job: { data: TaskJobData }): Promise<void> {
-    const { type, task_id, kind, message, title } = job.data;
+    const { type, task_id, kind, message, title, payload } = job.data;
 
     if (type === 'builtin') {
       const handler = this.builtinHandlers.get(task_id);
@@ -358,37 +559,289 @@ export class TaskScheduler {
         this.logger.error(`任务失败: ${task_id}`, err);
         throw err;
       }
-    } else if (type === 'dynamic') {
-      const effectiveKind = kind || 'message';
-      this.logger.info(`执行动态任务(${effectiveKind}): ${task_id}`);
+      return;
+    }
 
-      try {
-        if (effectiveKind === 'agent') {
-          if (!this.ctx.runAgentTask) {
-            this.logger.warn('runAgentTask 未注入，跳过 agent 类动态任务');
-            return;
-          }
-          await this.ctx.runAgentTask(message || '(空 prompt)', title);
-          this.logger.info(`动态 agent 任务已完成: ${task_id}`);
-        } else {
-          if (!this.ctx.sendMessageToOwner) {
-            this.logger.warn('sendMessageToOwner 未注入，跳过 message 类动态任务');
-            return;
-          }
-          await this.ctx.sendMessageToOwner(message || '(空消息)');
-          this.logger.info(`动态消息任务已发送: ${task_id}`);
+    const effectiveKind: DynamicTaskKind = kind || 'message';
+    this.logger.info(`执行动态任务(${effectiveKind}): ${task_id}`);
+
+    try {
+      if (effectiveKind === 'agent') {
+        await this.runAgentPrompt(message || '(空 prompt)', title);
+        this.logger.info(`动态 agent 任务已完成: ${task_id}`);
+      } else if (effectiveKind === 'workflow') {
+        if (!payload) {
+          throw new Error('workflow 任务缺少 payload');
         }
-      } catch (err) {
-        this.logger.error(`动态任务失败: ${task_id}`, err);
-        throw err;
+        const workflow = normalizeWorkflowPayload(JSON.parse(payload));
+        await this.runWorkflow(task_id, workflow, title || undefined);
+        this.logger.info(`动态 workflow 任务已完成: ${task_id}`);
+      } else {
+        if (!this.ctx.sendMessageToOwner) {
+          this.logger.warn('sendMessageToOwner 未注入，跳过 message 类动态任务');
+          return;
+        }
+        await this.ctx.sendMessageToOwner(message || '(空消息)');
+        this.logger.info(`动态消息任务已发送: ${task_id}`);
+      }
+    } catch (err) {
+      this.logger.error(`动态任务失败: ${task_id}`, err);
+      throw err;
+    }
+
+    const task = this.getRawDynamicTaskById(task_id);
+    if (task?.trigger_at) {
+      this.db.run("UPDATE dynamic_tasks SET status = 'completed' WHERE id = ?", [task_id]);
+      this.logger.info(`一次性任务已完成: ${task_id}`);
+    }
+  }
+
+  private async runAgentPrompt(prompt: string, title?: string): Promise<void> {
+    if (this.ctx.runAgentTask) {
+      await this.ctx.runAgentTask(prompt, title);
+      return;
+    }
+
+    const session = await this.ctx.agent.createSession();
+    try {
+      await this.ctx.agent.sendMessage(session.id, prompt);
+    } finally {
+      await this.ctx.agent.deleteSession(session.id);
+    }
+  }
+
+  private async runWorkflow(taskId: string, workflow: WorkflowTaskPayload, workflowTitle?: string): Promise<void> {
+    const runDir = this.createWorkflowRunDir(taskId);
+    const resultsFile = resolve(runDir, 'results.json');
+    const results: WorkflowStepRunRecord[] = [];
+
+    await Bun.write(
+      resolve(runDir, 'workflow.json'),
+      JSON.stringify({ taskId, title: workflowTitle || null, workflow }, null, 2),
+    );
+
+    for (let index = 0; index < workflow.steps.length; index++) {
+      const step = workflow.steps[index];
+      if (step.kind === 'shell') {
+        const result = await this.runWorkflowShellStep(step, index, runDir);
+        results.push(result);
+      } else {
+        const result = await this.runWorkflowAgentStep(taskId, step, index, runDir, results, workflowTitle);
+        results.push(result);
       }
 
-      // Check if one-shot → mark completed
-      const task = this.db.query('SELECT * FROM dynamic_tasks WHERE id = ?').get(task_id) as DynamicTask | null;
-      if (task?.trigger_at) {
-        this.db.run("UPDATE dynamic_tasks SET status = 'completed' WHERE id = ?", [task_id]);
-        this.logger.info(`一次性任务已完成: ${task_id}`);
+      await Bun.write(
+        resultsFile,
+        JSON.stringify(
+          {
+            taskId,
+            title: workflowTitle || null,
+            runDir,
+            steps: results,
+          },
+          null,
+          2,
+        ),
+      );
+    }
+  }
+
+  private async runWorkflowShellStep(
+    step: WorkflowShellStep,
+    index: number,
+    runDir: string,
+  ): Promise<WorkflowStepRunRecord> {
+    const outputDir = resolve(runDir, `${String(index + 1).padStart(2, '0')}-${sanitizePathSegment(step.id || step.kind)}`);
+    mkdirSync(outputDir, { recursive: true });
+
+    const startedAt = new Date();
+    const cwd = this.resolveStepCwd(step.cwd);
+    const timeoutSec = step.timeoutSec || DEFAULT_SHELL_TIMEOUT_SEC;
+    const timeoutMs = timeoutSec * 1000;
+
+    const proc = Bun.spawn(['/bin/zsh', '-lc', step.command], {
+      cwd,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+
+    let timedOut = false;
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      try {
+        proc.kill();
+      } catch {
+        // ignore
+      }
+    }, timeoutMs);
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      streamToText(proc.stdout),
+      streamToText(proc.stderr),
+      proc.exited,
+    ]);
+    clearTimeout(timeoutHandle);
+
+    const finishedAt = new Date();
+    const durationMs = finishedAt.getTime() - startedAt.getTime();
+    const stdoutPath = resolve(outputDir, 'stdout.txt');
+    const stderrPath = resolve(outputDir, 'stderr.txt');
+    const metaPath = resolve(outputDir, 'meta.json');
+
+    await Promise.all([
+      Bun.write(stdoutPath, stdout),
+      Bun.write(stderrPath, stderr),
+      Bun.write(
+        metaPath,
+        JSON.stringify(
+          {
+            stepId: step.id,
+            kind: step.kind,
+            command: step.command,
+            cwd,
+            timeoutSec,
+            exitCode,
+            timedOut,
+            startedAt: startedAt.toISOString(),
+            finishedAt: finishedAt.toISOString(),
+            durationMs,
+          },
+          null,
+          2,
+        ),
+      ),
+    ]);
+
+    const previewParts = [
+      stdout.trim() ? `stdout (tail):\n${tailText(stdout.trim(), PREVIEW_CHAR_LIMIT)}` : '',
+      stderr.trim() ? `stderr (tail):\n${tailText(stderr.trim(), PREVIEW_CHAR_LIMIT)}` : '',
+    ].filter(Boolean);
+
+    const result: WorkflowStepRunRecord = {
+      stepId: step.id || `step_${index + 1}`,
+      kind: 'shell',
+      startedAt: startedAt.toISOString(),
+      finishedAt: finishedAt.toISOString(),
+      durationMs,
+      outputDir,
+      command: step.command,
+      cwd,
+      timeoutSec,
+      exitCode,
+      timedOut,
+      stdoutPath,
+      stderrPath,
+      preview: previewParts.join('\n\n'),
+    };
+
+    if (timedOut || exitCode !== 0) {
+      const reason = timedOut
+        ? `超时 (${timeoutSec}s)`
+        : `exit=${exitCode}`;
+      throw new Error(
+        `workflow shell step 失败: step=${result.stepId}, reason=${reason}, stdout=${stdoutPath}, stderr=${stderrPath}`,
+      );
+    }
+
+    return result;
+  }
+
+  private async runWorkflowAgentStep(
+    taskId: string,
+    step: WorkflowAgentStep,
+    index: number,
+    runDir: string,
+    previousResults: WorkflowStepRunRecord[],
+    workflowTitle?: string,
+  ): Promise<WorkflowStepRunRecord> {
+    const outputDir = resolve(runDir, `${String(index + 1).padStart(2, '0')}-${sanitizePathSegment(step.id || step.kind)}`);
+    mkdirSync(outputDir, { recursive: true });
+
+    const startedAt = new Date();
+    const finalPrompt = this.buildWorkflowAgentPrompt(taskId, runDir, previousResults, step.prompt, workflowTitle);
+    const promptPath = resolve(outputDir, 'prompt.md');
+    await Bun.write(promptPath, finalPrompt);
+
+    await this.runAgentPrompt(finalPrompt, step.title || workflowTitle || undefined);
+
+    const finishedAt = new Date();
+    return {
+      stepId: step.id || `step_${index + 1}`,
+      kind: 'agent',
+      startedAt: startedAt.toISOString(),
+      finishedAt: finishedAt.toISOString(),
+      durationMs: finishedAt.getTime() - startedAt.getTime(),
+      outputDir,
+      title: step.title || workflowTitle || null,
+      promptPath,
+      preview: truncateText(step.prompt, PREVIEW_CHAR_LIMIT),
+    };
+  }
+
+  private buildWorkflowAgentPrompt(
+    taskId: string,
+    runDir: string,
+    previousResults: WorkflowStepRunRecord[],
+    stepPrompt: string,
+    workflowTitle?: string,
+  ): string {
+    const lines = [
+      '[Workflow 上下文]',
+      `- taskId: ${taskId}`,
+      `- workflowTitle: ${workflowTitle || '(none)'}`,
+      `- runDir: ${runDir}`,
+      '- 这是 Sage scheduler 自动触发的 workflow。',
+      '- 如果前置 shell step 已成功完成，不要重复运行这些 shell 命令；直接复用已有产物。',
+      '- 如需详细内容，优先读取上面 runDir 中的文件，而不是重跑准备步骤。',
+      '',
+      '[前序步骤结果]',
+    ];
+
+    if (previousResults.length === 0) {
+      lines.push('- (none)');
+    } else {
+      for (const result of previousResults) {
+        lines.push(`- stepId: ${result.stepId}`);
+        lines.push(`  kind: ${result.kind}`);
+        lines.push(`  durationMs: ${result.durationMs}`);
+        if (result.kind === 'shell') {
+          if (result.command) lines.push(`  command: ${result.command}`);
+          if (result.cwd) lines.push(`  cwd: ${result.cwd}`);
+          if (typeof result.exitCode === 'number') lines.push(`  exitCode: ${result.exitCode}`);
+          if (typeof result.timedOut === 'boolean') lines.push(`  timedOut: ${String(result.timedOut)}`);
+          if (result.stdoutPath) lines.push(`  stdoutPath: ${result.stdoutPath}`);
+          if (result.stderrPath) lines.push(`  stderrPath: ${result.stderrPath}`);
+        } else {
+          if (result.title) lines.push(`  title: ${result.title}`);
+          if (result.promptPath) lines.push(`  promptPath: ${result.promptPath}`);
+        }
+        if (result.preview) {
+          lines.push('  preview:');
+          for (const previewLine of result.preview.split('\n')) {
+            lines.push(`    ${previewLine}`);
+          }
+        }
       }
     }
+
+    lines.push('');
+    lines.push('[当前步骤要求]');
+    lines.push(stepPrompt);
+    return lines.join('\n');
+  }
+
+  private createWorkflowRunDir(taskId: string): string {
+    const repoRoot = resolve(import.meta.dir, '../..');
+    const root = resolve(repoRoot, 'agent_home/workspace/outputs/workflows');
+    const runDir = resolve(root, taskId, formatRunTimestamp());
+    mkdirSync(runDir, { recursive: true });
+    return runDir;
+  }
+
+  private resolveStepCwd(stepCwd?: string | null): string {
+    const expanded = expandHomeDir(stepCwd);
+    if (!expanded) return process.cwd();
+    if (expanded.startsWith('/')) return expanded;
+    return resolve(process.cwd(), expanded);
   }
 }

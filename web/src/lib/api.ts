@@ -58,11 +58,32 @@ export interface BuiltinTask {
   allowInDev: boolean;
 }
 
+export interface WorkflowShellStep {
+  id?: string;
+  kind: 'shell';
+  command: string;
+  cwd?: string | null;
+  timeoutSec?: number | null;
+}
+
+export interface WorkflowAgentStep {
+  id?: string;
+  kind: 'agent';
+  prompt: string;
+  title?: string | null;
+}
+
+export interface WorkflowPayload {
+  version: 1;
+  steps: Array<WorkflowShellStep | WorkflowAgentStep>;
+}
+
 export interface DynamicTask {
   id: string;
-  kind: 'message' | 'agent';
+  kind: 'message' | 'agent' | 'workflow';
   message: string;
   title: string | null;
+  payload: WorkflowPayload | null;
   pattern: string | null;
   trigger_at: number | null;
   status: string;
@@ -70,11 +91,14 @@ export interface DynamicTask {
 }
 
 export interface CreateDynamicTaskInput {
-  kind?: 'message' | 'agent';
+  kind?: 'message' | 'agent' | 'workflow';
   message?: string;
   prompt?: string;
+  description?: string;
   title?: string;
   topic?: string;
+  workflow?: WorkflowPayload;
+  payload?: WorkflowPayload;
   pattern?: string;
   triggerAt?: number;
 }

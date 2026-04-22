@@ -106,17 +106,25 @@ class Application {
     app.post('/scheduler/tasks', async (c) => {
       try {
         const body = await c.req.json();
-        // kind: 'message'(默认, 纯文本提醒) | 'agent'(触发 agent 对话)
-        // message 字段: kind=message 时为文本；kind=agent 时为 prompt（也可通过 prompt 字段传）
-        const kind: 'message' | 'agent' = body.kind === 'agent' ? 'agent' : 'message';
-        const content = body.message ?? body.prompt;
-        if (!content) {
+        // kind: 'message'(默认) | 'agent' | 'workflow'
+        // workflow 使用 workflow/payload 字段承载 steps，message 可作为人类可读摘要
+        const kind = body.kind === 'workflow'
+          ? 'workflow'
+          : body.kind === 'agent'
+            ? 'agent'
+            : 'message';
+        const workflow = body.workflow ?? body.payload;
+        const content = kind === 'workflow'
+          ? (body.message ?? body.description ?? '')
+          : (body.message ?? body.prompt);
+        if (kind !== 'workflow' && !content) {
           return c.json({ error: 'message (or prompt for kind=agent) is required' }, 400);
         }
         const task = await this.scheduler.createDynamicTask({
           kind,
-          message: content,
+          message: content ?? '',
           title: body.title ?? body.topic,
+          payload: workflow,
           pattern: body.pattern,
           triggerAt: body.triggerAt,
         });

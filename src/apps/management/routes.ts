@@ -73,15 +73,23 @@ export function createManagementRoutes(sageCore: SageCore, scheduler: TaskSchedu
   app.post('/scheduler/tasks', async (c) => {
     try {
       const body = await c.req.json();
-      const kind: 'message' | 'agent' = body.kind === 'agent' ? 'agent' : 'message';
-      const content = body.message ?? body.prompt;
-      if (!content) {
+      const kind = body.kind === 'workflow'
+        ? 'workflow'
+        : body.kind === 'agent'
+          ? 'agent'
+          : 'message';
+      const workflow = body.workflow ?? body.payload;
+      const content = kind === 'workflow'
+        ? (body.message ?? body.description ?? '')
+        : (body.message ?? body.prompt);
+      if (kind !== 'workflow' && !content) {
         return c.json({ error: 'message (or prompt for kind=agent) is required' }, 400);
       }
       const task = await scheduler.createDynamicTask({
         kind,
-        message: content,
+        message: content ?? '',
         title: body.title ?? body.topic,
+        payload: workflow,
         pattern: body.pattern,
         triggerAt: body.triggerAt,
       });

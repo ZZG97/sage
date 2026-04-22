@@ -29,8 +29,16 @@ user_invocable: true
 
 ```json
 {
-  "kind": "message",            // 'message'(默认,纯文本提醒) | 'agent'(触发 agent 对话)
-  "message": "要发送的消息或 prompt",
+  "kind": "message",            // 'message'(默认,纯文本提醒) | 'agent'(触发 agent 对话) | 'workflow'(线性 step 工作流)
+  "message": "要发送的消息、prompt，或 workflow 的人类可读摘要",
+  "title": "任务标题",            // agent/workflow 可选
+  "workflow": {                  // kind='workflow' 时必填
+    "version": 1,
+    "steps": [
+      { "id": "prep", "kind": "shell", "command": "echo ready", "cwd": "~/workspace/sage/agent_home", "timeoutSec": 30 },
+      { "id": "digest", "kind": "agent", "title": "示例", "prompt": "基于 workflow 上下文继续处理，不要重跑 shell" }
+    ]
+  },
   "pattern": "30 9 * * 1-5",   // cron pattern（周期任务，二选一）
   "triggerAt": 1712345678000    // epoch ms（一次性任务，二选一）
 }
@@ -39,7 +47,12 @@ user_invocable: true
 - `kind`（可选，默认 `message`）：
   - `message` — 到点直接发一条飞书纯文本。便宜、快，适合"提醒我吃药""30分钟后叫我起床"这种静态提醒。
   - `agent` — 到点触发一次完整的 agent 对话，结果以**流式卡片**形式发送（和用户主动对话体验一致，能看到思考/工具调用过程）。适合"每天早上帮我汇总 GitHub notifications""每周五生成工作总结"这种需要实时计算或联网的任务。每次执行创建独立 session，不共享上下文。
-- `message`（必填）：kind=message 时为文本内容；kind=agent 时作为喂给 agent 的 prompt（也可用 `prompt` 字段，两者等价）
+  - `workflow` — 一个调度任务内顺序执行多个 step，目前只支持线性 `shell` / `agent` steps。适合"先拉数据，再让 agent 总结"这类任务；比如 RSS 先跑抓取脚本，再让 agent 基于产物输出摘要。
+- `message`（非 workflow 时必填）：kind=message 时为文本内容；kind=agent 时作为喂给 agent 的 prompt（也可用 `prompt` 字段，两者等价）；kind=workflow 时可作为任务摘要，不填则后端会根据 steps 自动生成。
+- `workflow`：仅 kind=workflow 时使用。`steps` 目前只支持：
+  - `shell` step：`command` 必填，可选 `cwd` / `timeoutSec`
+  - `agent` step：`prompt` 必填，可选 `title`
+- **注意**：当前没有独立的顶层 `shell` kind。只跑 shell 的定时任务，也要用单 step `workflow` 表达。
 - `pattern`（周期）：标准 5 位 cron，时区 Asia/Shanghai
 - `triggerAt`（一次性）：Unix 毫秒时间戳，必须是未来时间
 
@@ -55,10 +68,11 @@ user_invocable: true
 | 周期提醒 | message | "每天早上8点提醒我喝水"、"每周五下午5点提醒写周报"、"工作日9:30提醒站会" |
 | 一次性 agent 任务 | agent | "1小时后帮我查一下北京天气并总结"、"今晚10点帮我把今天的 git 提交汇总一下" |
 | 周期 agent 任务 | agent | "每天早上帮我汇总 GitHub notifications"、"每周五生成本周工作总结"、"每天9点帮我看看 sage-dev 有没有异常日志" |
+| 先准备再处理 | workflow | "每2小时先抓 RSS，再让 agent 汇总"、"每天9点先跑脚本收集日志，再分析异常" |
 | 查看任务 | — | "看看我有哪些定时任务"、"我的提醒列表" |
 | 删除任务 | — | "取消那个喝水提醒"、"删掉明天的提醒" |
 
-**kind 判断原则：** 用户描述是"让系统到点发一条静态文字"就是 `message`；用户描述需要到点**做事/查信息/生成内容**才发给我，就是 `agent`。拿不准时优先问用户。
+**kind 判断原则：** 用户描述是"让系统到点发一条静态文字"就是 `message`；用户描述需要到点**做事/查信息/生成内容**但不强调前置准备，就是 `agent`；用户明确是"先跑脚本/拉数据，再总结/分析/发结果"，或者为了稳定性必须把准备阶段从 agent 决策里拿出来，就是 `workflow`。拿不准时优先问用户。
 
 ### 2. 创建一次性提醒
 
@@ -112,6 +126,34 @@ curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
 curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
   -H "Content-Type: application/json" \
   -d '{"kind":"agent","prompt":"汇总今天的 GitHub notifications 并发给我","pattern":"0 9 * * *"}'
+
+# 周期 workflow：先 shell，再 agent
+curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "kind":"workflow",
+    "title":"RSS 定时摘要",
+    "message":"先抓 RSS，再让 agent 汇总",
+    "pattern":"0 */2 * * *",
+    "workflow":{
+      "version":1,
+      "steps":[
+        {
+          "id":"fetch",
+          "kind":"shell",
+          "command":"./.claude/skills/rss-manager/scripts/fetch_items.sh",
+          "cwd":"~/workspace/sage/agent_home",
+          "timeoutSec":2400
+        },
+        {
+          "id":"digest",
+          "kind":"agent",
+          "title":"RSS 定时摘要",
+          "prompt":"不要重跑 fetch；直接基于 workflow 上下文中的 shell 产物做摘要。"
+        }
+      ]
+    }
+  }'
 ```
 
 ### 4. 查看任务
@@ -133,11 +175,13 @@ curl -s "http://localhost:$(printenv PORT)/scheduler/tasks?all=true" | python3 -
 | 1 | 一次性 | message | 提醒开会 | 04-11 15:00 | active |
 | 2 | 周期 | message | 喝水提醒 | 每小时整点 | active |
 | 3 | 周期 | agent | 汇总 GitHub notifications | 每天 09:00 | active |
+| 4 | 周期 | workflow | 先抓 RSS，再让 agent 汇总 | 每2小时 | active |
 ```
 
 - `pattern` 有值 → 周期任务，展示 cron 的中文解释
 - `trigger_at` 有值 → 一次性，展示具体时间
 - `kind=agent` 时"内容"展示的是 prompt；卡片结果用户会看到完整 agent 输出
+- `kind=workflow` 时"内容"展示的是摘要 message；如需细看，可查看 `payload.workflow.steps`
 - 用 `created_at` 的 epoch ms 转可读时间
 
 ### 5. 删除任务

@@ -10,6 +10,9 @@ Run:
 CHUNKS=$(./.claude/skills/rss-manager/scripts/fetch_items.sh)
 ```
 
+If Sage scheduler/workflow already ran the fetch step and provided chunk paths or fetch artifact paths in the prompt/context,
+do not rerun the fetch command. Reuse the provided outputs directly and treat the fetch phase as already completed.
+
 The script:
 
 - Reads feed URLs from `~/.rsshub/feeds.txt` or skill-local `feeds.txt`.
