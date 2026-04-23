@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -25,6 +26,30 @@ XML_NAMESPACES = {
 }
 
 HTML_TAG_RE = re.compile(r"<[^>]+>")
+SOURCE_DESCRIPTION_LIMIT = 500
+
+
+def parse_limit(env_name: str, default: int | None) -> int | None:
+    raw = os.getenv(env_name)
+    if raw is None:
+        return default
+
+    raw = raw.strip()
+    if raw == "":
+        return default
+
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+
+    if value <= 0:
+        return None
+
+    return value
+
+
+CONTENT_TEXT_LIMIT = parse_limit("RSS_CONTENT_TEXT_LIMIT", 20000)
 
 
 def strip_html(text: str) -> str:
@@ -57,6 +82,21 @@ def first_text(elem: ET.Element, candidates: Iterable[str], *, strip_tags: bool 
         if value:
             return value
     return ""
+
+
+def first_text_with_source(
+    elem: ET.Element,
+    candidates: Iterable[str],
+    *,
+    strip_tags: bool = False,
+    limit: int | None = None,
+) -> tuple[str, str]:
+    for candidate in candidates:
+        found = elem.find(candidate, XML_NAMESPACES)
+        value = text_content(found, strip_tags=strip_tags, limit=limit)
+        if value:
+            return value, candidate
+    return "", ""
 
 
 def atom_link(elem: ET.Element) -> str:
@@ -97,6 +137,7 @@ def build_record(
     link: str,
     guid: str,
     description: str,
+    content_source_field: str,
     pub_date: str,
     item_author: str,
 ) -> dict[str, str]:
@@ -111,6 +152,7 @@ def build_record(
         "link": link,
         "guid": guid,
         "description": description,
+        "content_source_field": content_source_field,
         "pubDate": pub_date,
         "feed_url": feed_url,
         "source_type": source_type,
@@ -132,7 +174,7 @@ def parse_rss(root: ET.Element, feed_url: str) -> list[dict[str, str]]:
 
     source_title = first_text(channel, ["title"])
     source_link = first_text(channel, ["link"])
-    source_description = first_text(channel, ["description"], strip_tags=True, limit=500)
+    source_description = first_text(channel, ["description"], strip_tags=True, limit=SOURCE_DESCRIPTION_LIMIT)
     source_author = ""
     source_contact = first_text(channel, ["managingEditor", "webMaster"])
 
@@ -141,11 +183,11 @@ def parse_rss(root: ET.Element, feed_url: str) -> list[dict[str, str]]:
         title = first_text(item, ["title"])
         link = first_text(item, ["link"])
         guid = first_text(item, ["guid"]) or link
-        description = first_text(
+        description, content_source_field = first_text_with_source(
             item,
             ["description", "content:encoded", "content"],
             strip_tags=True,
-            limit=500,
+            limit=CONTENT_TEXT_LIMIT,
         )
         pub_date = first_text(item, ["pubDate"])
         item_author = first_text(item, ["author", "dc:creator"])
@@ -163,6 +205,7 @@ def parse_rss(root: ET.Element, feed_url: str) -> list[dict[str, str]]:
                 link=link,
                 guid=guid,
                 description=description,
+                content_source_field=content_source_field,
                 pub_date=pub_date,
                 item_author=item_author,
             )
@@ -174,7 +217,7 @@ def parse_rss(root: ET.Element, feed_url: str) -> list[dict[str, str]]:
 def parse_atom(root: ET.Element, feed_url: str) -> list[dict[str, str]]:
     source_title = first_text(root, ["atom:title"])
     source_link = atom_link(root)
-    source_description = first_text(root, ["atom:subtitle"], strip_tags=True, limit=500)
+    source_description = first_text(root, ["atom:subtitle"], strip_tags=True, limit=SOURCE_DESCRIPTION_LIMIT)
     source_author = atom_author_name(root)
     source_contact = ""
 
@@ -183,11 +226,11 @@ def parse_atom(root: ET.Element, feed_url: str) -> list[dict[str, str]]:
         title = first_text(entry, ["atom:title"])
         link = atom_link(entry)
         guid = first_text(entry, ["atom:id"]) or link
-        description = first_text(
+        description, content_source_field = first_text_with_source(
             entry,
             ["atom:summary", "atom:content", "content:encoded"],
             strip_tags=True,
-            limit=500,
+            limit=CONTENT_TEXT_LIMIT,
         )
         pub_date = first_text(entry, ["atom:published", "atom:updated"])
         item_author = atom_author_name(entry) or first_text(entry, ["dc:creator"])
@@ -205,6 +248,7 @@ def parse_atom(root: ET.Element, feed_url: str) -> list[dict[str, str]]:
                 link=link,
                 guid=guid,
                 description=description,
+                content_source_field=content_source_field,
                 pub_date=pub_date,
                 item_author=item_author,
             )

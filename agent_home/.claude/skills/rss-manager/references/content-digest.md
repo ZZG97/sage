@@ -20,6 +20,11 @@ The script:
 - Preserves feed-level and item-level metadata when present, including `source_title`, `source_link`,
   `source_description`, `source_author`, `source_contact`, `item_author`, plus a best-effort `author` fallback and
   `author_source`.
+- Normalizes item body into a single plain-text field:
+  `description` = normalized body text from the winning feed field (default limit 20,000 chars, configurable via
+  `RSS_CONTENT_TEXT_LIMIT`);
+  `content_source_field` = which feed field won (`description`, `content:encoded`, `content`, `atom:summary`, or
+  `atom:content`).
 - Rate-limits Weibo feeds by default: `RSS_WEIBO_FETCH_DELAY_SECONDS=30` with
   `RSS_WEIBO_FETCH_JITTER_SECONDS=5`, so each interval is 25-35s by default; after
   `RSS_WEIBO_MAX_CONSECUTIVE_FAILURES=3` consecutive Weibo failures, skips remaining Weibo feeds for the current run and
@@ -52,7 +57,8 @@ For each item, extract:
 - Whether it suggests an action, follow-up, or watch item.
 
 Before attribution, prefer `author`, then raw `item_author` / `source_author` / `source_title`, then explicit display names
-that appear in item title/description/content. For Zhihu people feeds, use
+that appear in item title/description/content. `description` now carries the normalized body text for downstream reading.
+For Zhihu people feeds, use
 `references/zhihu-followees.md` and its canonical inventory to map `url_token` to `name` when item content is not explicit.
 Use skill-local `references/source-aliases.md` only for exceptions not derivable from content or canonical inventories.
 RSSHub feed paths, Zhihu slugs, numeric Xueqiu ids, and X/Twitter handles may not equal the public display name.
