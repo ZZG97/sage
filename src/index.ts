@@ -3,6 +3,7 @@ import { WebServer } from './services/web';
 import { HistoryStore } from './services/history-store';
 import { TaskScheduler } from './services/task-scheduler';
 import { getBuiltinTasks } from './services/tasks';
+import { registerSchedulerRoutes } from './apps/management/routes';
 import { validateConfig, getAgentConfig, getAllAvailableProviderConfigs } from './config';
 import { createAgentProvider } from './agent';
 import { Logger } from './utils';
@@ -80,10 +81,10 @@ class Application {
   }
 
   private setupSchedulerRoutes(): void {
-    const app = this.webServer.getApp();
+    registerSchedulerRoutes(this.webServer.getApp(), this.scheduler);
 
-    // 手动触发内置任务
-    app.post('/scheduler/run/:name', async (c) => {
+    // 兼容旧 scheduler skill 的 run-now 路径
+    this.webServer.getApp().post('/scheduler/run/:name', async (c) => {
       const name = c.req.param('name');
       try {
         await this.scheduler.runNow(name);
@@ -91,57 +92,6 @@ class Application {
       } catch (error) {
         return c.json({ success: false, error: String(error) }, 500);
       }
-    });
-
-    // --- Dynamic task CRUD ---
-
-    // 列出动态任务
-    app.get('/scheduler/tasks', (c) => {
-      const all = c.req.query('all') === 'true';
-      const tasks = this.scheduler.listDynamicTasks(all);
-      return c.json({ tasks });
-    });
-
-    // 创建动态任务
-    app.post('/scheduler/tasks', async (c) => {
-      try {
-        const body = await c.req.json();
-        // kind: 'message'(默认) | 'agent' | 'workflow'
-        // workflow 使用 workflow/payload 字段承载 steps，message 可作为人类可读摘要
-        const kind = body.kind === 'workflow'
-          ? 'workflow'
-          : body.kind === 'agent'
-            ? 'agent'
-            : 'message';
-        const workflow = body.workflow ?? body.payload;
-        const content = kind === 'workflow'
-          ? (body.message ?? body.description ?? '')
-          : (body.message ?? body.prompt);
-        if (kind !== 'workflow' && !content) {
-          return c.json({ error: 'message (or prompt for kind=agent) is required' }, 400);
-        }
-        const task = await this.scheduler.createDynamicTask({
-          kind,
-          message: content ?? '',
-          title: body.title ?? body.topic,
-          payload: workflow,
-          pattern: body.pattern,
-          triggerAt: body.triggerAt,
-        });
-        return c.json({ success: true, task });
-      } catch (error) {
-        return c.json({ error: String(error) }, 400);
-      }
-    });
-
-    // 删除动态任务
-    app.delete('/scheduler/tasks/:id', async (c) => {
-      const id = c.req.param('id');
-      const ok = await this.scheduler.removeDynamicTask(id);
-      if (!ok) {
-        return c.json({ error: 'task not found' }, 404);
-      }
-      return c.json({ success: true });
     });
   }
 

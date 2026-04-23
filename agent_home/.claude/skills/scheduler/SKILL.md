@@ -1,7 +1,7 @@
 ---
 name: scheduler
 description: >
-  Manage scheduled tasks: create reminders, recurring tasks, list and delete tasks.
+  Manage scheduled tasks: create reminders, recurring tasks, update tasks, list and delete tasks.
   Use when: user says "提醒我", "remind me", "定时", "每天XX点", "XX分钟后", "XX点提醒",
   "查看定时任务", "删除提醒", "取消提醒", "scheduled tasks", "timer", "alarm",
   or any scheduling/reminder related request.
@@ -10,7 +10,7 @@ user_invocable: true
 
 # Scheduler Skill
 
-通过 Sage HTTP API 管理定时任务：创建提醒/周期任务、查看、删除。
+通过 Sage HTTP API 管理定时任务：创建提醒/周期任务、更新、查看、删除。
 
 **API Base:** `http://localhost:$(printenv PORT)/scheduler/tasks`（`PORT` 由 Sage 进程注入 env，自动区分 prod/dev）
 
@@ -22,6 +22,7 @@ user_invocable: true
 |---|---|---|
 | GET | `/scheduler/tasks` | 列出活跃任务（`?all=true` 含已完成） |
 | POST | `/scheduler/tasks` | 创建任务 |
+| PATCH | `/scheduler/tasks/:id` | 更新 active 动态任务，并刷新运行中的 scheduler 注册项 |
 | DELETE | `/scheduler/tasks/:id` | 删除/取消任务 |
 | POST | `/scheduler/run/:name` | 手动触发内置任务 |
 
@@ -184,7 +185,52 @@ curl -s "http://localhost:$(printenv PORT)/scheduler/tasks?all=true" | python3 -
 - `kind=workflow` 时"内容"展示的是摘要 message；如需细看，可查看 `payload.workflow.steps`
 - 用 `created_at` 的 epoch ms 转可读时间
 
-### 5. 删除任务
+### 5. 更新任务
+
+先查看任务列表，找到 id，再用完整的新配置 PATCH。PATCH 会原地更新 active 任务，并同步刷新运行中的 scheduler 注册项；不要为了改文案/cron 先 DELETE 再 POST，除非 PATCH 返回不支持或任务已不是 active。
+
+```bash
+# 更新纯文本提醒内容和 cron
+curl -s -X PATCH "http://localhost:$(printenv PORT)/scheduler/tasks/{task_id}" \
+  -H "Content-Type: application/json" \
+  -d '{"kind":"message","message":"⏰ 提醒：更新后的内容","pattern":"30 9 * * 1-5"}'
+```
+
+```bash
+# 更新 workflow 的 agent prompt
+curl -s -X PATCH "http://localhost:$(printenv PORT)/scheduler/tasks/{task_id}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "kind":"workflow",
+    "title":"RSS 定时摘要",
+    "message":"先抓 RSS，再让 agent 汇总",
+    "pattern":"0 */2 * * *",
+    "workflow":{
+      "version":1,
+      "steps":[
+        {
+          "id":"fetch",
+          "kind":"shell",
+          "command":"./.claude/skills/rss-manager/scripts/fetch_items.sh",
+          "cwd":"~/workspace/sage/agent_home",
+          "timeoutSec":2400
+        },
+        {
+          "id":"digest",
+          "kind":"agent",
+          "title":"RSS 定时摘要",
+          "prompt":"这是由 Sage scheduler 自动触发的 RSS workflow。使用 rss-manager skill 总结内容；不要重新运行 RSS 抓取脚本；直接基于 workflow 上下文里 fetch step 的 stdout/stderr 文件、chunk 路径和抓取统计做分析；最后报告来源数、新增数、失败数、跳过数和需要调整的订阅建议。若 fetch step 没有产出 chunk 文件且抓取成功，输出“今日没有新内容”；若抓取失败，要明确报失败，不要误报无新内容。"
+        }
+      ]
+    }
+  }'
+```
+
+- PATCH body 和 POST body 结构相同，必须带完整 `kind`、内容、`pattern` 或 `triggerAt`。
+- 只能更新 `active` 动态任务；`completed/cancelled` 任务需要新建。
+- 更新 one-shot 任务时，新的 `triggerAt` 仍必须是未来时间。
+
+### 6. 删除任务
 
 先查看任务列表，找到 id，再删除：
 

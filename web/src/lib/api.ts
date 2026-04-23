@@ -103,6 +103,8 @@ export interface CreateDynamicTaskInput {
   triggerAt?: number;
 }
 
+export type UpdateDynamicTaskInput = CreateDynamicTaskInput;
+
 export const schedulerApi = {
   getBuiltinTasks: () => request<{ tasks: BuiltinTask[] }>('/apps/management/scheduler/builtin'),
   runBuiltinTask: (name: string) =>
@@ -114,6 +116,11 @@ export const schedulerApi = {
   createDynamicTask: (input: CreateDynamicTaskInput) =>
     request<{ success: boolean; task: DynamicTask }>('/apps/management/scheduler/tasks', {
       method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  updateDynamicTask: (id: string, input: UpdateDynamicTaskInput) =>
+    request<{ success: boolean; task: DynamicTask }>(`/apps/management/scheduler/tasks/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
       body: JSON.stringify(input),
     }),
   deleteDynamicTask: (id: string) =>

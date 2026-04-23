@@ -11,10 +11,41 @@ import { useQuery } from '@/lib/hooks';
 import { Card, CardTitle, StatValue } from '@/components/Card';
 
 type ScheduleMode = 'cron' | 'oneshot';
+const DEFAULT_CRON_PATTERN = '0 9 * * 1-5';
+const DEFAULT_WORKFLOW_SPEC = `{
+  "version": 1,
+  "steps": [
+    {
+      "id": "fetch",
+      "kind": "shell",
+      "command": "./.claude/skills/rss-manager/scripts/fetch_items.sh",
+      "cwd": "~/workspace/sage/agent_home",
+      "timeoutSec": 2400
+    },
+    {
+      "id": "digest",
+      "kind": "agent",
+      "title": "RSS 定时摘要",
+      "prompt": "基于 workflow 上下文中的抓取结果做中文摘要，不要重新抓取。"
+    }
+  ]
+}`;
 
 function formatTimestamp(timestamp: number | null): string {
   if (!timestamp) return '-';
   return dayjs(timestamp).format('YYYY-MM-DD HH:mm');
+}
+
+function formatDatetimeLocal(timestamp: number | null): string {
+  if (!timestamp) {
+    return dayjs().add(1, 'hour').format('YYYY-MM-DDTHH:mm');
+  }
+  return dayjs(timestamp).format('YYYY-MM-DDTHH:mm');
+}
+
+function formatWorkflowPayload(payload: WorkflowPayload | null): string {
+  if (!payload) return DEFAULT_WORKFLOW_SPEC;
+  return JSON.stringify(payload, null, 2);
 }
 
 function KindBadge({ kind }: { kind: DynamicTask['kind'] }) {
@@ -98,11 +129,17 @@ function BuiltinTaskCard({
 
 function DynamicTaskCard({
   task,
+  editing,
+  updating,
   deleting,
+  onEdit,
   onDelete,
 }: {
   task: DynamicTask;
+  editing: boolean;
+  updating: boolean;
   deleting: boolean;
+  onEdit: () => void;
   onDelete: () => void;
 }) {
   const scheduleLabel = task.pattern
@@ -140,13 +177,27 @@ function DynamicTaskCard({
           </div>
         </div>
         {task.status === 'active' && (
-          <button
-            onClick={onDelete}
-            disabled={deleting}
-            className="rounded-lg border border-[var(--color-danger)]/40 px-3 py-2 text-sm text-[var(--color-danger)] transition-colors hover:bg-[var(--color-danger)]/10 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {deleting ? 'Deleting...' : 'Delete'}
-          </button>
+          <div className="flex shrink-0 flex-col gap-2">
+            <button
+              onClick={onEdit}
+              disabled={updating || deleting}
+              className={clsx(
+                'rounded-lg border px-3 py-2 text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-60',
+                editing
+                  ? 'border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-text)]'
+                  : 'border-[var(--color-border)] hover:bg-[var(--color-bg-hover)]',
+              )}
+            >
+              {updating ? 'Saving...' : editing ? 'Editing' : 'Edit'}
+            </button>
+            <button
+              onClick={onDelete}
+              disabled={deleting || updating}
+              className="rounded-lg border border-[var(--color-danger)]/40 px-3 py-2 text-sm text-[var(--color-danger)] transition-colors hover:bg-[var(--color-danger)]/10 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {deleting ? 'Deleting...' : 'Delete'}
+            </button>
+          </div>
         )}
       </div>
     </div>
@@ -155,30 +206,14 @@ function DynamicTaskCard({
 
 export function SchedulerPage() {
   const [showAll, setShowAll] = useState(false);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [kind, setKind] = useState<DynamicTask['kind']>('message');
   const [scheduleMode, setScheduleMode] = useState<ScheduleMode>('cron');
   const [message, setMessage] = useState('');
   const [title, setTitle] = useState('');
-  const [workflowSpec, setWorkflowSpec] = useState(`{
-  "version": 1,
-  "steps": [
-    {
-      "id": "fetch",
-      "kind": "shell",
-      "command": "./.claude/skills/rss-manager/scripts/fetch_items.sh",
-      "cwd": "~/workspace/sage/agent_home",
-      "timeoutSec": 2400
-    },
-    {
-      "id": "digest",
-      "kind": "agent",
-      "title": "RSS 定时摘要",
-      "prompt": "基于 workflow 上下文中的抓取结果做中文摘要，不要重新抓取。"
-    }
-  ]
-}`);
-  const [pattern, setPattern] = useState('0 9 * * 1-5');
-  const [triggerAt, setTriggerAt] = useState(dayjs().add(1, 'hour').format('YYYY-MM-DDTHH:mm'));
+  const [workflowSpec, setWorkflowSpec] = useState(DEFAULT_WORKFLOW_SPEC);
+  const [pattern, setPattern] = useState(DEFAULT_CRON_PATTERN);
+  const [triggerAt, setTriggerAt] = useState(formatDatetimeLocal(null));
   const [submitting, setSubmitting] = useState(false);
   const [runningBuiltin, setRunningBuiltin] = useState<string | null>(null);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
@@ -199,6 +234,7 @@ export function SchedulerPage() {
 
   const builtinTasks = builtinData?.tasks ?? [];
   const dynamicTasks = dynamicData?.tasks ?? [];
+  const isEditing = editingTaskId !== null;
 
   const stats = {
     visible: dynamicTasks.length,
@@ -207,7 +243,29 @@ export function SchedulerPage() {
     workflow: dynamicTasks.filter((task) => task.kind === 'workflow').length,
   };
 
-  const handleCreateTask = async (e: FormEvent) => {
+  const resetForm = () => {
+    setEditingTaskId(null);
+    setKind('message');
+    setScheduleMode('cron');
+    setMessage('');
+    setTitle('');
+    setWorkflowSpec(DEFAULT_WORKFLOW_SPEC);
+    setPattern(DEFAULT_CRON_PATTERN);
+    setTriggerAt(formatDatetimeLocal(null));
+  };
+
+  const handleEditTask = (task: DynamicTask) => {
+    setEditingTaskId(task.id);
+    setKind(task.kind);
+    setScheduleMode(task.pattern ? 'cron' : 'oneshot');
+    setMessage(task.message);
+    setTitle(task.title ?? '');
+    setWorkflowSpec(formatWorkflowPayload(task.payload));
+    setPattern(task.pattern ?? DEFAULT_CRON_PATTERN);
+    setTriggerAt(formatDatetimeLocal(task.trigger_at));
+  };
+
+  const handleSubmitTask = async (e: FormEvent) => {
     e.preventDefault();
 
     const content = message.trim();
@@ -252,16 +310,20 @@ export function SchedulerPage() {
 
     setSubmitting(true);
     try {
-      await schedulerApi.createDynamicTask({
+      const input = {
         ...payload,
         pattern: scheduleMode === 'cron' ? pattern.trim() : undefined,
         triggerAt: scheduleMode === 'oneshot' ? dayjs(triggerAt).valueOf() : undefined,
-      });
-      setMessage('');
-      if (kind === 'agent' || kind === 'workflow') setTitle('');
+      };
+      if (editingTaskId) {
+        await schedulerApi.updateDynamicTask(editingTaskId, input);
+      } else {
+        await schedulerApi.createDynamicTask(input);
+      }
+      resetForm();
       await refetchDynamic();
     } catch (err: any) {
-      alert(err.message || '创建任务失败');
+      alert(err.message || (editingTaskId ? '更新任务失败' : '创建任务失败'));
     } finally {
       setSubmitting(false);
     }
@@ -284,6 +346,9 @@ export function SchedulerPage() {
     setDeletingTaskId(id);
     try {
       await schedulerApi.deleteDynamicTask(id);
+      if (editingTaskId === id) {
+        resetForm();
+      }
       await refetchDynamic();
     } catch (err: any) {
       alert(err.message || '删除任务失败');
@@ -345,8 +410,13 @@ export function SchedulerPage() {
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
         <Card>
-          <CardTitle>Create Dynamic Task</CardTitle>
-          <form className="space-y-4" onSubmit={handleCreateTask}>
+          <CardTitle>{isEditing ? 'Edit Dynamic Task' : 'Create Dynamic Task'}</CardTitle>
+          <form className="space-y-4" onSubmit={handleSubmitTask}>
+            {isEditing && (
+              <div className="rounded-xl border border-[var(--color-primary)]/25 bg-[var(--color-primary)]/10 px-4 py-3 text-sm text-[var(--color-text)]">
+                正在编辑任务 <span className="font-mono">{editingTaskId?.slice(0, 8)}</span>。保存后会原地刷新 scheduler 注册项，不会再走删重建。
+              </div>
+            )}
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <label className="block">
                 <div className="mb-2 text-sm text-[var(--color-text-secondary)]">Task Kind</div>
@@ -449,13 +519,25 @@ export function SchedulerPage() {
               <div className="text-xs text-[var(--color-text-secondary)]">
                 所有时间按 `Asia/Shanghai` 解释；one-shot 执行后会自动标记为 `completed`。
               </div>
-              <button
-                type="submit"
-                disabled={submitting}
-                className="rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {submitting ? 'Creating...' : 'Create Task'}
-              </button>
+              <div className="flex items-center gap-2">
+                {isEditing && (
+                  <button
+                    type="button"
+                    onClick={resetForm}
+                    disabled={submitting}
+                    className="rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm transition-colors hover:bg-[var(--color-bg-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Cancel
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {submitting ? (isEditing ? 'Saving...' : 'Creating...') : isEditing ? 'Save Changes' : 'Create Task'}
+                </button>
+              </div>
             </div>
           </form>
         </Card>
@@ -495,7 +577,10 @@ export function SchedulerPage() {
               <DynamicTaskCard
                 key={task.id}
                 task={task}
+                editing={editingTaskId === task.id}
+                updating={submitting && editingTaskId === task.id}
                 deleting={deletingTaskId === task.id}
+                onEdit={() => handleEditTask(task)}
                 onDelete={() => handleDeleteTask(task.id)}
               />
             ))}

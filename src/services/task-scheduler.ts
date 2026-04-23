@@ -62,6 +62,15 @@ export interface WorkflowTaskPayload {
   steps: WorkflowStep[];
 }
 
+export interface DynamicTaskWriteOptions {
+  kind?: DynamicTaskKind;
+  message: string;
+  title?: string;
+  payload?: WorkflowTaskPayload;
+  pattern?: string;
+  triggerAt?: number;
+}
+
 /** A dynamic scheduled task stored in SQLite */
 export interface DynamicTask {
   id: string;
@@ -355,77 +364,16 @@ export class TaskScheduler {
   // ─── Dynamic Task CRUD ─────────────────────────────────────────────────────
 
   /** Create a dynamic scheduled task (recurring or one-shot) */
-  async createDynamicTask(opts: {
-    kind?: DynamicTaskKind;
-    message: string;
-    title?: string;
-    payload?: WorkflowTaskPayload;
-    pattern?: string;
-    triggerAt?: number;
-  }): Promise<DynamicTask> {
-    if (!opts.pattern && !opts.triggerAt) {
-      throw new Error('Must provide either pattern (cron) or triggerAt (one-shot)');
-    }
-
-    const kind: DynamicTaskKind = opts.kind || 'message';
-    const payload = kind === 'workflow' ? normalizeWorkflowPayload(opts.payload) : null;
-    const workflowSummary = payload ? summarizeWorkflowPayload(payload) : '';
-    const message = kind === 'workflow'
-      ? (opts.message.trim() || workflowSummary)
-      : opts.message.trim();
-
-    if (!message) {
-      throw new Error('message 不能为空');
-    }
-
+  async createDynamicTask(opts: DynamicTaskWriteOptions): Promise<DynamicTask> {
     const id = crypto.randomUUID();
-    const now = Date.now();
-    const task: DynamicTask = {
-      id,
-      kind,
-      message,
-      title: opts.title || null,
-      payload,
-      pattern: opts.pattern || null,
-      trigger_at: opts.triggerAt || null,
-      status: 'active',
-      created_at: now,
-    };
+    const task = this.normalizeDynamicTask(id, opts, Date.now());
 
-    this.db.run(
-      `INSERT INTO dynamic_tasks (id, kind, message, title, payload, pattern, trigger_at, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        task.id,
-        task.kind,
-        task.message,
-        task.title,
-        task.payload ? JSON.stringify(task.payload) : null,
-        task.pattern,
-        task.trigger_at,
-        task.status,
-        task.created_at,
-      ],
-    );
-
-    const jobData = this.buildDynamicJobData(task);
-
-    if (opts.triggerAt) {
-      const delay = opts.triggerAt - now;
-      if (delay <= 0) {
-        throw new Error('triggerAt must be in the future');
-      }
-      await this.queue.add('task', jobData, { delay, jobId: `dynamic:${id}` });
-      this.logger.info(
-        `创建一次性任务(${kind}): ${id}, 将在 ${new Date(opts.triggerAt).toLocaleString('zh-CN', { timeZone: TIMEZONE })} 触发`,
-      );
-    } else if (opts.pattern) {
-      await this.queue.upsertJobScheduler(
-        `dynamic:${id}`,
-        { pattern: opts.pattern, timezone: TIMEZONE },
-        { name: 'task', data: jobData },
-      );
-      this.logger.info(`创建周期任务(${kind}): ${id}, pattern=${opts.pattern}`);
+    this.insertDynamicTask(task);
+    try {
+      await this.registerDynamicTask(task);
+    } catch (error) {
+      this.db.run('DELETE FROM dynamic_tasks WHERE id = ?', [id]);
+      throw error;
     }
 
     return task;
@@ -450,15 +398,70 @@ export class TaskScheduler {
     const task = this.getRawDynamicTaskById(id);
     if (!task) return false;
 
-    if (task.pattern) {
-      try { await this.queue.removeJobScheduler(`dynamic:${id}`); } catch { /* may not exist */ }
-    } else {
-      try { await this.queue.removeAsync(`dynamic:${id}`); } catch { /* may have fired */ }
-    }
+    await this.unregisterDynamicTask(this.deserializeDynamicTask(task));
 
     this.db.run("UPDATE dynamic_tasks SET status = 'cancelled' WHERE id = ?", [id]);
     this.logger.info(`删除动态任务: ${id}`);
     return true;
+  }
+
+  /** Update an active dynamic task and refresh its bunqueue registration */
+  async updateDynamicTask(id: string, opts: DynamicTaskWriteOptions): Promise<DynamicTask | null> {
+    const existingRaw = this.getRawDynamicTaskById(id);
+    if (!existingRaw) return null;
+
+    const existing = this.deserializeDynamicTask(existingRaw);
+    if (existing.status !== 'active') {
+      throw new Error('只能更新 active 状态的动态任务');
+    }
+
+    const nextTask = this.normalizeDynamicTask(id, opts, existing.created_at);
+    const restorePayload = existing.payload ? JSON.stringify(existing.payload) : null;
+
+    await this.unregisterDynamicTask(existing);
+
+    this.db.run(
+      `UPDATE dynamic_tasks
+       SET kind = ?, message = ?, title = ?, payload = ?, pattern = ?, trigger_at = ?
+       WHERE id = ?`,
+      [
+        nextTask.kind,
+        nextTask.message,
+        nextTask.title,
+        nextTask.payload ? JSON.stringify(nextTask.payload) : null,
+        nextTask.pattern,
+        nextTask.trigger_at,
+        id,
+      ],
+    );
+
+    try {
+      await this.registerDynamicTask(nextTask);
+      this.logger.info(`更新动态任务(${nextTask.kind}): ${id}`);
+      return nextTask;
+    } catch (error) {
+      this.db.run(
+        `UPDATE dynamic_tasks
+         SET kind = ?, message = ?, title = ?, payload = ?, pattern = ?, trigger_at = ?
+         WHERE id = ?`,
+        [
+          existing.kind,
+          existing.message,
+          existing.title,
+          restorePayload,
+          existing.pattern,
+          existing.trigger_at,
+          id,
+        ],
+      );
+
+      try {
+        await this.registerDynamicTask(existing);
+      } catch (restoreError) {
+        this.logger.error(`恢复动态任务失败: ${id}`, restoreError);
+      }
+      throw error;
+    }
   }
 
   /** Manually trigger a built-in task (for testing) */
@@ -482,6 +485,53 @@ export class TaskScheduler {
       title: task.title || undefined,
       payload: task.payload ? JSON.stringify(task.payload) : undefined,
     };
+  }
+
+  private normalizeDynamicTask(id: string, opts: DynamicTaskWriteOptions, createdAt: number): DynamicTask {
+    if (!opts.pattern && !opts.triggerAt) {
+      throw new Error('Must provide either pattern (cron) or triggerAt (one-shot)');
+    }
+
+    const kind: DynamicTaskKind = opts.kind || 'message';
+    const payload = kind === 'workflow' ? normalizeWorkflowPayload(opts.payload) : null;
+    const workflowSummary = payload ? summarizeWorkflowPayload(payload) : '';
+    const message = kind === 'workflow'
+      ? (opts.message.trim() || workflowSummary)
+      : opts.message.trim();
+
+    if (!message) {
+      throw new Error('message 不能为空');
+    }
+
+    return {
+      id,
+      kind,
+      message,
+      title: opts.title || null,
+      payload,
+      pattern: opts.pattern || null,
+      trigger_at: opts.triggerAt || null,
+      status: 'active',
+      created_at: createdAt,
+    };
+  }
+
+  private insertDynamicTask(task: DynamicTask): void {
+    this.db.run(
+      `INSERT INTO dynamic_tasks (id, kind, message, title, payload, pattern, trigger_at, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        task.id,
+        task.kind,
+        task.message,
+        task.title,
+        task.payload ? JSON.stringify(task.payload) : null,
+        task.pattern,
+        task.trigger_at,
+        task.status,
+        task.created_at,
+      ],
+    );
   }
 
   private getRawDynamicTaskById(id: string): RawDynamicTask | null {
@@ -515,22 +565,11 @@ export class TaskScheduler {
 
     for (const row of rows) {
       const task = this.deserializeDynamicTask(row);
-      const jobData = this.buildDynamicJobData(task);
-
-      if (task.trigger_at) {
-        if (task.trigger_at <= now) {
-          this.db.run("UPDATE dynamic_tasks SET status = 'completed' WHERE id = ?", [task.id]);
-          continue;
-        }
-        const delay = task.trigger_at - now;
-        await this.queue.add('task', jobData, { delay, jobId: `dynamic:${task.id}` });
-      } else if (task.pattern) {
-        await this.queue.upsertJobScheduler(
-          `dynamic:${task.id}`,
-          { pattern: task.pattern, timezone: TIMEZONE },
-          { name: 'task', data: jobData },
-        );
+      if (task.trigger_at && task.trigger_at <= now) {
+        this.db.run("UPDATE dynamic_tasks SET status = 'completed' WHERE id = ?", [task.id]);
+        continue;
       }
+      await this.registerDynamicTask(task);
       loaded++;
     }
 
@@ -608,6 +647,42 @@ export class TaskScheduler {
     } finally {
       await this.ctx.agent.deleteSession(session.id);
     }
+  }
+
+  private async registerDynamicTask(task: DynamicTask): Promise<void> {
+    const jobData = this.buildDynamicJobData(task);
+
+    if (task.trigger_at) {
+      const delay = task.trigger_at - Date.now();
+      if (delay <= 0) {
+        throw new Error('triggerAt must be in the future');
+      }
+      await this.queue.add('task', jobData, { delay, jobId: `dynamic:${task.id}` });
+      this.logger.info(
+        `注册一次性任务(${task.kind}): ${task.id}, 将在 ${new Date(task.trigger_at).toLocaleString('zh-CN', { timeZone: TIMEZONE })} 触发`,
+      );
+      return;
+    }
+
+    if (!task.pattern) {
+      throw new Error('动态任务缺少 pattern / trigger_at');
+    }
+
+    await this.queue.upsertJobScheduler(
+      `dynamic:${task.id}`,
+      { pattern: task.pattern, timezone: TIMEZONE },
+      { name: 'task', data: jobData },
+    );
+    this.logger.info(`注册周期任务(${task.kind}): ${task.id}, pattern=${task.pattern}`);
+  }
+
+  private async unregisterDynamicTask(task: Pick<DynamicTask, 'id' | 'pattern' | 'trigger_at'>): Promise<void> {
+    if (task.pattern) {
+      try { await this.queue.removeJobScheduler(`dynamic:${task.id}`); } catch { /* may not exist */ }
+      return;
+    }
+
+    try { await this.queue.removeAsync(`dynamic:${task.id}`); } catch { /* may have fired */ }
   }
 
   private async runWorkflow(taskId: string, workflow: WorkflowTaskPayload, workflowTitle?: string): Promise<void> {
