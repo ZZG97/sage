@@ -1,6 +1,6 @@
 import { resolve } from 'path';
 import { Logger } from '../../utils';
-import { decideRefresh, getDomainIntervalSeconds } from './refresh-policy';
+import { decideDomainBackoff, decideRefresh, getDomainIntervalSeconds } from './refresh-policy';
 import { FreshRssRepository } from './freshrss-repository';
 import type { FreshRssFeed, RefreshResult } from './types';
 
@@ -15,7 +15,7 @@ export class RssRefreshController {
   ) {}
 
   async refreshEligibleFeeds(limit: number, dryRun = false): Promise<RefreshResult[]> {
-    const feeds = this.repository.listFeeds();
+    const feeds = this.repository.listInputFeeds();
     const results: RefreshResult[] = [];
     const lastDomainAttempt = new Map<string, number>();
 
@@ -23,7 +23,12 @@ export class RssRefreshController {
       if (results.length >= limit) break;
       const state = this.repository.getRefreshState(feed.id, feed.domain);
       const domainState = this.repository.getDomainRefreshState(feed.domain);
-      const decision = decideRefresh(feed, mergeRefreshState(state, domainState));
+      const domainDecision = decideDomainBackoff(domainState);
+      if (!domainDecision.allowed) {
+        continue;
+      }
+
+      const decision = decideRefresh(feed, state);
       if (!decision.allowed) {
         continue;
       }
@@ -49,6 +54,27 @@ export class RssRefreshController {
       results.push(result);
 
       logger.info(`刷新 ${feed.name}: ${result.ok ? 'OK' : 'FAIL'} new=${result.newArticles}`);
+    }
+
+    return results;
+  }
+
+  async refreshFeedIds(feedIds: number[], dryRun = false): Promise<RefreshResult[]> {
+    const feeds = this.repository.getFeedsByIds(feedIds);
+    const foundIds = new Set(feeds.map((feed) => feed.id));
+    for (const feedId of feedIds) {
+      if (!foundIds.has(feedId)) {
+        logger.warn(`跳过输出源刷新: feedId=${feedId} 不存在`);
+      }
+    }
+
+    const results: RefreshResult[] = [];
+    for (const feed of feeds) {
+      const result = dryRun
+        ? this.dryRunResult(feed)
+        : await this.refreshOneFeed(feed);
+      results.push(result);
+      logger.info(`刷新输出源 ${feed.name}: ${result.ok ? 'OK' : 'FAIL'} new=${result.newArticles}`);
     }
 
     return results;
@@ -123,21 +149,4 @@ function shellQuote(value: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function mergeRefreshState<T extends { last_attempt_at: number | null; last_success_at: number | null; consecutive_failures: number; backoff_until: number | null }>(
-  feedState: T | null,
-  domainState: T | null,
-): T | null {
-  if (!feedState && !domainState) return null;
-  if (!feedState) return domainState;
-  if (!domainState) return feedState;
-
-  return {
-    ...feedState,
-    last_attempt_at: Math.max(feedState.last_attempt_at ?? 0, domainState.last_attempt_at ?? 0) || null,
-    last_success_at: Math.max(feedState.last_success_at ?? 0, domainState.last_success_at ?? 0) || null,
-    consecutive_failures: Math.max(feedState.consecutive_failures, domainState.consecutive_failures),
-    backoff_until: Math.max(feedState.backoff_until ?? 0, domainState.backoff_until ?? 0) || null,
-  };
 }

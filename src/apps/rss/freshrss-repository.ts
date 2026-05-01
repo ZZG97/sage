@@ -2,7 +2,9 @@ import { Database } from 'bun:sqlite';
 import { resolve } from 'path';
 import { getDatabase } from '../../shared/db';
 import { detectFeedDomain, nextBackoffUntil, type RefreshState } from './refresh-policy';
-import type { FeedDomain, FreshRssEntry, FreshRssFeed, LabelResult, RefreshResult } from './types';
+import type { FeedDomain, FreshRssEntry, FreshRssFeed, LabelResult, RefreshResult, RssPriority } from './types';
+
+const GENERATED_FEED_URL_MARKER = '/apps/rss/feeds/';
 
 interface EntryRow {
   id: number;
@@ -15,6 +17,48 @@ interface EntryRow {
   id_feed: number;
   feed_name: string;
   feed_url: string;
+}
+
+function parseJsonArray(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string')
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function toFreshRssFeed(row: Omit<FreshRssFeed, 'domain'>): FreshRssFeed {
+  return {
+    ...row,
+    domain: detectFeedDomain(row.url),
+  };
+}
+
+function isSageGeneratedFeedUrl(url: string): boolean {
+  return url.includes(GENERATED_FEED_URL_MARKER);
+}
+
+export interface AiFeedItem {
+  entry_id: number;
+  feed_id: number;
+  feed_name: string;
+  title: string;
+  author: string | null;
+  link: string;
+  content: string | null;
+  published_at: number | null;
+  priority: RssPriority;
+  labels: string[];
+  topics: string[];
+  confidence: number;
+  summary: string | null;
+  reason: string;
+  fact_or_opinion: string;
+  model: string;
+  processed_at: string;
 }
 
 export class FreshRssRepository {
@@ -37,10 +81,33 @@ export class FreshRssRepository {
       LIMIT ?
     `).all(limit) as Omit<FreshRssFeed, 'domain'>[];
 
-    return rows.map((row) => ({
-      ...row,
-      domain: detectFeedDomain(row.url),
-    }));
+    return rows.map(toFreshRssFeed);
+  }
+
+  listInputFeeds(limit = 1000): FreshRssFeed[] {
+    return this.listFeeds(limit).filter((feed) => !isSageGeneratedFeedUrl(feed.url));
+  }
+
+  listGeneratedFeeds(limit = 1000): FreshRssFeed[] {
+    return this.listFeeds(limit).filter((feed) => isSageGeneratedFeedUrl(feed.url));
+  }
+
+  getFeedsByIds(feedIds: number[]): FreshRssFeed[] {
+    if (feedIds.length === 0) return [];
+
+    const uniqueIds = [...new Set(feedIds)];
+    const placeholders = uniqueIds.map(() => '?').join(',');
+    const rows = this.freshDb.prepare(`
+      SELECT id, url, name, lastUpdate, error, ttl
+      FROM feed
+      WHERE id IN (${placeholders})
+    `).all(...uniqueIds) as Omit<FreshRssFeed, 'domain'>[];
+    const feedsById = new Map(rows.map((row) => [row.id, toFreshRssFeed(row)]));
+
+    return uniqueIds.flatMap((id) => {
+      const feed = feedsById.get(id);
+      return feed ? [feed] : [];
+    });
   }
 
   listUnprocessedEntries(sinceHours = 48, limit = 50): FreshRssEntry[] {
@@ -50,9 +117,10 @@ export class FreshRssRepository {
       FROM entry e
       JOIN feed f ON f.id = e.id_feed
       WHERE COALESCE(e.date, 0) >= ?
+        AND f.url NOT LIKE ?
       ORDER BY e.id DESC
       LIMIT ?
-    `).all(sinceSeconds, Math.max(limit * 20, 200)) as EntryRow[];
+    `).all(sinceSeconds, `%${GENERATED_FEED_URL_MARKER}%`, Math.max(limit * 20, 200)) as EntryRow[];
 
     const processedStmt = this.sidecarDb.prepare('SELECT content_hash, dry_run FROM processed_entries WHERE entry_id = ?');
     const entries: FreshRssEntry[] = [];
@@ -68,32 +136,95 @@ export class FreshRssRepository {
     return entries;
   }
 
-  applyLabelResult(entry: FreshRssEntry, result: LabelResult, labels: string[], contentHash: string, dryRun = false): void {
+  recordAiResult(entry: FreshRssEntry, result: LabelResult, labels: string[], contentHash: string, dryRun = false): void {
     if (dryRun) {
       return;
     }
-
-    const apply = this.freshDb.transaction(() => {
-      for (const label of labels) {
-        this.freshDb.prepare('INSERT OR IGNORE INTO tag (name, attributes) VALUES (?, NULL)').run(label);
-      }
-
-      const priorityTagIds = this.freshDb.prepare(`
-        SELECT id FROM tag WHERE name IN ('AI·必读', 'AI·可看', 'AI·略过')
-      `).all() as { id: number }[];
-      for (const tag of priorityTagIds) {
-        this.freshDb.prepare('DELETE FROM entrytag WHERE id_tag = ? AND id_entry = ?').run(tag.id, entry.id);
-      }
-
-      for (const label of labels) {
-        const tag = this.freshDb.prepare('SELECT id FROM tag WHERE name = ?').get(label) as { id: number } | null;
-        if (!tag) continue;
-        this.freshDb.prepare('INSERT OR IGNORE INTO entrytag (id_tag, id_entry) VALUES (?, ?)').run(tag.id, entry.id);
-      }
-    });
-
-    apply();
     this.recordProcessed(entry, result, labels, contentHash, false);
+  }
+
+  listAiFeedItems(options: { priority: RssPriority; sinceHours: number; limit: number }): AiFeedItem[] {
+    const since = new Date(Date.now() - options.sinceHours * 3600 * 1000)
+      .toISOString()
+      .replace('T', ' ')
+      .slice(0, 19);
+    const processedRows = this.sidecarDb.prepare(`
+      SELECT
+        entry_id,
+        feed_id,
+        priority,
+        topics_json,
+        labels_json,
+        confidence,
+        reason,
+        fact_or_opinion,
+        model,
+        summary,
+        processed_at
+      FROM processed_entries
+      WHERE dry_run = 0
+        AND priority = ?
+        AND processed_at >= ?
+      ORDER BY processed_at DESC, entry_id DESC
+      LIMIT ?
+    `).all(options.priority, since, options.limit) as Array<{
+      entry_id: number;
+      feed_id: number;
+      priority: RssPriority;
+      topics_json: string;
+      labels_json: string;
+      confidence: number;
+      reason: string;
+      fact_or_opinion: string;
+      model: string;
+      summary: string | null;
+      processed_at: string;
+    }>;
+
+    if (processedRows.length === 0) return [];
+
+    const entryIds = processedRows.map((row) => row.entry_id);
+    const placeholders = entryIds.map(() => '?').join(',');
+    const entryRows = this.freshDb.prepare(`
+      SELECT e.id, e.title, e.author, e.content, e.link, e.date, e.id_feed, f.name AS feed_name
+      FROM entry e
+      JOIN feed f ON f.id = e.id_feed
+      WHERE e.id IN (${placeholders})
+    `).all(...entryIds) as Array<{
+      id: number;
+      title: string;
+      author: string | null;
+      content: string | null;
+      link: string;
+      date: number | null;
+      id_feed: number;
+      feed_name: string;
+    }>;
+    const entriesById = new Map(entryRows.map((entry) => [entry.id, entry]));
+
+    return processedRows.flatMap((row) => {
+      const entry = entriesById.get(row.entry_id);
+      if (!entry) return [];
+      return [{
+        entry_id: row.entry_id,
+        feed_id: row.feed_id,
+        feed_name: entry.feed_name,
+        title: entry.title,
+        author: entry.author,
+        link: entry.link,
+        content: entry.content,
+        published_at: entry.date,
+        priority: row.priority,
+        labels: parseJsonArray(row.labels_json),
+        topics: parseJsonArray(row.topics_json),
+        confidence: row.confidence,
+        summary: row.summary,
+        reason: row.reason,
+        fact_or_opinion: row.fact_or_opinion,
+        model: row.model,
+        processed_at: row.processed_at,
+      }];
+    });
   }
 
   getRefreshState(feedId: number, domain: FeedDomain): RefreshState | null {
@@ -105,6 +236,11 @@ export class FreshRssRepository {
   }
 
   getDomainRefreshState(domain: FeedDomain): RefreshState | null {
+    const generatedFeedIds = this.listGeneratedFeeds().map((feed) => feed.id);
+    const generatedFilter = generatedFeedIds.length > 0
+      ? `AND feed_id NOT IN (${generatedFeedIds.map(() => '?').join(',')})`
+      : '';
+
     return this.sidecarDb.prepare(`
       SELECT
         0 AS feed_id,
@@ -115,8 +251,9 @@ export class FreshRssRepository {
         MAX(backoff_until) AS backoff_until
       FROM feed_refresh_state
       WHERE domain = ?
+        ${generatedFilter}
       GROUP BY domain
-    `).get(domain) as RefreshState | null;
+    `).get(domain, ...generatedFeedIds) as RefreshState | null;
   }
 
   recordRefreshAttempt(feed: FreshRssFeed): void {
@@ -175,8 +312,8 @@ export class FreshRssRepository {
     this.sidecarDb.prepare(`
       INSERT INTO processed_entries (
         entry_id, feed_id, guid, link, content_hash, priority, topics_json, labels_json,
-        confidence, reason, fact_or_opinion, model, dry_run, processed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+        confidence, reason, fact_or_opinion, model, summary, dry_run, processed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
       ON CONFLICT(entry_id) DO UPDATE SET
         content_hash = excluded.content_hash,
         priority = excluded.priority,
@@ -186,6 +323,7 @@ export class FreshRssRepository {
         reason = excluded.reason,
         fact_or_opinion = excluded.fact_or_opinion,
         model = excluded.model,
+        summary = excluded.summary,
         dry_run = excluded.dry_run,
         processed_at = excluded.processed_at
     `).run(
@@ -201,6 +339,7 @@ export class FreshRssRepository {
       result.reason,
       result.fact_or_opinion,
       result.model,
+      result.summary ?? null,
       dryRun ? 1 : 0,
     );
   }

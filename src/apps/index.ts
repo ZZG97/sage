@@ -4,6 +4,7 @@ import { Logger } from '../utils';
 import { createDebugRoutes } from './debug/routes';
 import { createHealthRoutes } from './health/routes';
 import { createManagementRoutes } from './management/routes';
+import { createRssRoutes } from './rss/routes';
 import type { SageCore } from '../services/core';
 import type { TaskScheduler } from '../services/task-scheduler';
 
@@ -26,6 +27,7 @@ const apps: AppDefinition[] = [
   { name: 'debug', path: '/apps/debug', createRoutes: () => createDebugRoutes() },
   { name: 'health', path: '/apps/health', createRoutes: () => createHealthRoutes() },
   { name: 'management', path: '/apps/management', createRoutes: (ctx) => createManagementRoutes(ctx.sageCore, ctx.scheduler) },
+  { name: 'rss', path: '/apps/rss', createRoutes: () => createRssRoutes() },
 ];
 
 /** 将所有 App 路由挂载到主 Hono 实例 */

@@ -13,6 +13,8 @@ export { ClaudeCodeProvider } from './claude-code-provider';
 export { CodexProvider } from './codex-provider';
 export { CcMinimaxProvider } from './cc-minimax-provider';
 export { FallbackAgentProvider } from './fallback-provider';
+export { StructuredAgentRunner } from './structured-runner';
+export type { StructuredTask, StructuredTaskResult } from './structured-runner';
 
 /**
  * 创建单个 AgentProvider 实例

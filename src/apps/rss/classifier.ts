@@ -1,31 +1,60 @@
 import { createHash } from 'crypto';
+import { createAgentProvider, StructuredAgentRunner } from '../../agent';
+import type { AgentProviderConfig } from '../../agent';
 import type { FreshRssEntry, LabelResult, RssPriority, RssTopic } from './types';
 
-const TOPIC_KEYWORDS: Array<[RssTopic, RegExp]> = [
-  ['investment', /股票|股价|估值|财报|基金|港股|美股|A股|公司|收入|利润|现金流|资产|负债|投资|市场|雪球|\$[A-Z0-9.]+|\b[A-Z]{2,5}\b/i],
-  ['ai', /AI|LLM|大模型|模型|Claude|OpenAI|Anthropic|Gemini|agent|智能体|推理|训练|算力|GPU|芯片/i],
-  ['engineering', /代码|架构|数据库|服务端|后端|前端|工程|系统|API|开源|框架|部署|性能|缓存|并发|TypeScript|Python|Go|Rust/i],
-  ['macro', /宏观|政策|央行|利率|通胀|汇率|财政|地产|就业|GDP|周期|关税|贸易|美联储|债券/i],
-  ['life', /生活|旅行|吃|电影|音乐|游戏|家庭|孩子|北京|海淀|健身|睡眠|情绪|娱乐/i],
-];
+interface BatchOutput {
+  items: BatchItemOutput[];
+}
 
-const NOISE_RE = /抽奖|转发微博|关注并转发|直播预约|招聘|内推|优惠券|带货|团购|开奖|粉丝福利/i;
+interface BatchItemOutput {
+  id: string;
+  priority: RssPriority;
+  topics: RssTopic[];
+  confidence: number;
+  reason: string;
+  summary: string;
+  fact_or_opinion: LabelResult['fact_or_opinion'];
+}
+
+const PRIORITIES = ['must_read', 'skim', 'skip'] as const;
+const TOPICS = ['investment', 'ai', 'engineering', 'macro', 'life'] as const;
+const FACT_OR_OPINION = ['fact', 'opinion', 'mixed', 'unknown'] as const;
 
 export class RssClassifier {
-  async classify(entry: FreshRssEntry): Promise<LabelResult> {
-    const ruleResult = this.classifyByRules(entry);
-    if (!this.shouldUseLlm(ruleResult, entry)) {
-      return ruleResult;
-    }
+  private runner?: StructuredAgentRunner;
 
-    try {
-      return await this.classifyByLlm(entry, ruleResult);
-    } catch {
+  async classifyBatch(entries: FreshRssEntry[]): Promise<LabelResult[]> {
+    if (entries.length === 0) return [];
+    const runner = await this.getRunner();
+    const expectedIds = entries.map((entry) => String(entry.id));
+    const prompt = buildPrompt(entries);
+
+    const result = await runner.run<BatchOutput>({
+      name: 'rss.classify.batch',
+      prompt,
+      outputSchema: RSS_BATCH_OUTPUT_SCHEMA,
+      validate: (raw) => validateBatchOutput(raw, expectedIds),
+      timeoutMs: parsePositiveInt(process.env.RSS_AI_TIMEOUT_MS, 120000),
+      retries: parseNonNegativeInt(process.env.RSS_AI_RETRIES, 1),
+    });
+
+    const byId = new Map(result.value.items.map((item) => [item.id, item]));
+    return entries.map((entry) => {
+      const item = byId.get(String(entry.id));
+      if (!item) {
+        throw new Error(`missing classified item: ${entry.id}`);
+      }
       return {
-        ...ruleResult,
-        reason: `${ruleResult.reason}; llm_failed_rule_fallback`,
+        priority: item.priority,
+        topics: item.topics,
+        confidence: item.confidence,
+        reason: item.reason,
+        summary: item.summary,
+        fact_or_opinion: item.fact_or_opinion,
+        model: process.env.RSS_AI_MODEL || process.env.RSS_AI_CODEX_MODEL || process.env.CODEX_MODEL || 'gpt-5.3-codex',
       };
-    }
+    });
   }
 
   contentHash(entry: FreshRssEntry): string {
@@ -34,139 +63,163 @@ export class RssClassifier {
       .digest('hex');
   }
 
-  private classifyByRules(entry: FreshRssEntry): LabelResult {
-    const text = normalizeText(`${entry.title}\n${entry.content ?? ''}`);
-    const topics = detectTopics(text);
-    const length = text.length;
-    const noisy = NOISE_RE.test(text);
-    const hasStrongTopic = topics.some((topic) => topic !== 'life');
-    const hasUsefulSignals = /数据|原因|因为|结论|变化|增长|下降|风险|机会|复盘|分析|验证|假设|预期|观察|趋势/.test(text);
-
-    let priority: RssPriority = 'skim';
-    const reasons: string[] = [];
-
-    if (noisy) {
-      priority = 'skip';
-      reasons.push('noise_keyword');
-    } else if (length < 80 && !hasUsefulSignals) {
-      priority = 'skip';
-      reasons.push('too_short_low_signal');
-    } else if (hasStrongTopic && (length >= 500 || hasUsefulSignals)) {
-      priority = 'must_read';
-      reasons.push('strong_topic_with_signal');
-    } else if (hasStrongTopic || hasUsefulSignals) {
-      priority = 'skim';
-      reasons.push('some_signal');
-    } else {
-      priority = 'skip';
-      reasons.push('off_topic_or_low_signal');
-    }
-
-    return {
-      priority,
-      topics: topics.length > 0 ? topics : ['life'],
-      confidence: priority === 'skim' ? 0.62 : 0.72,
-      reason: reasons.join(','),
-      fact_or_opinion: inferFactOrOpinion(text),
-      model: 'rules-v1',
-    };
+  batchSize(): number {
+    return parsePositiveInt(process.env.RSS_AI_BATCH_SIZE, 10);
   }
 
-  private shouldUseLlm(ruleResult: LabelResult, entry: FreshRssEntry): boolean {
-    if (process.env.RSS_AI_ENABLE_LLM !== '1') return false;
-    if (!process.env.OPENAI_API_KEY || !process.env.RSS_AI_MODEL) return false;
-    if (ruleResult.priority === 'skip' && ruleResult.confidence >= 0.7) return false;
-    const contentLength = normalizeText(`${entry.title}\n${entry.content ?? ''}`).length;
-    return contentLength >= 80;
-  }
-
-  private async classifyByLlm(entry: FreshRssEntry, fallback: LabelResult): Promise<LabelResult> {
-    const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
-    const model = process.env.RSS_AI_MODEL!;
-    const text = normalizeText(`${entry.title}\n${entry.content ?? ''}`).slice(0, 6000);
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'system',
-            content: '你是老张的 RSS 信息流质量分类器。只输出 JSON，不要 markdown。priority 只能是 must_read/skim/skip；topics 从 investment/ai/engineering/macro/life 中选 1-2 个；confidence 0-1；fact_or_opinion 为 fact/opinion/mixed/unknown。',
-          },
-          {
-            role: 'user',
-            content: JSON.stringify({
-              feed: entry.feed_name,
-              author: entry.author,
-              title: entry.title,
-              text,
-              rule_hint: fallback,
-            }, null, 2),
-          },
-        ],
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`LLM request failed: ${response.status}`);
-    }
-
-    const data = await response.json() as any;
-    const raw = data.choices?.[0]?.message?.content;
-    if (!raw || typeof raw !== 'string') {
-      throw new Error('LLM response missing content');
-    }
-
-    const parsed = JSON.parse(raw);
-    return normalizeLlmResult(parsed, model, fallback);
+  private async getRunner(): Promise<StructuredAgentRunner> {
+    if (this.runner) return this.runner;
+    const provider = createAgentProvider([buildRssAgentProviderConfig()]);
+    await provider.initialize();
+    this.runner = new StructuredAgentRunner(provider);
+    return this.runner;
   }
 }
 
-function detectTopics(text: string): RssTopic[] {
-  const topics: RssTopic[] = [];
-  for (const [topic, pattern] of TOPIC_KEYWORDS) {
-    if (pattern.test(text)) {
-      topics.push(topic);
-    }
+function buildRssAgentProviderConfig(): AgentProviderConfig {
+  const provider = process.env.RSS_AI_PROVIDER || 'codex';
+  if (provider !== 'codex') {
+    throw new Error(`RSS_AI_PROVIDER=${provider} is not supported yet; use codex`);
   }
-  return topics.slice(0, 2);
-}
-
-function inferFactOrOpinion(text: string): LabelResult['fact_or_opinion'] {
-  const hasFact = /数据|公告|财报|报告|显示|同比|环比|收入|利润|发布|发生|完成|增长|下降/.test(text);
-  const hasOpinion = /认为|感觉|我觉得|可能|预期|估计|判断|看好|不看好|风险|机会|应该|或许/.test(text);
-  if (hasFact && hasOpinion) return 'mixed';
-  if (hasFact) return 'fact';
-  if (hasOpinion) return 'opinion';
-  return 'unknown';
-}
-
-function normalizeLlmResult(input: any, model: string, fallback: LabelResult): LabelResult {
-  const priority = ['must_read', 'skim', 'skip'].includes(input.priority) ? input.priority as RssPriority : fallback.priority;
-  const topics = Array.isArray(input.topics)
-    ? input.topics.filter((topic: string) => ['investment', 'ai', 'engineering', 'macro', 'life'].includes(topic)).slice(0, 2) as RssTopic[]
-    : fallback.topics;
-  const confidence = typeof input.confidence === 'number'
-    ? Math.max(0, Math.min(1, input.confidence))
-    : fallback.confidence;
-  const factOrOpinion = ['fact', 'opinion', 'mixed', 'unknown'].includes(input.fact_or_opinion)
-    ? input.fact_or_opinion
-    : fallback.fact_or_opinion;
 
   return {
-    priority,
-    topics: topics.length > 0 ? topics : fallback.topics,
-    confidence,
-    reason: typeof input.reason === 'string' ? input.reason.slice(0, 500) : fallback.reason,
-    fact_or_opinion: factOrOpinion,
-    model,
+    type: 'codex',
+    workDir: process.env.RSS_AI_WORK_DIR || process.env.CODEX_WORK_DIR || process.cwd(),
+    model: process.env.RSS_AI_MODEL || process.env.RSS_AI_CODEX_MODEL || process.env.CODEX_MODEL || 'gpt-5.3-codex',
+    reasoningEffort: parseReasoningEffort(process.env.RSS_AI_REASONING || 'low'),
+    sandboxMode: 'read-only',
   };
+}
+
+function buildPrompt(entries: FreshRssEntry[]): string {
+  const items = entries.map((entry) => ({
+    id: String(entry.id),
+    feed: entry.feed_name,
+    domain: entry.domain,
+    author: entry.author,
+    title: entry.title,
+    link: entry.link,
+    text: normalizeText(`${entry.title}\n${entry.content ?? ''}`).slice(0, parsePositiveInt(process.env.RSS_AI_TEXT_LIMIT, 5000)),
+  }));
+
+  return [
+    '你是老张的 RSS 信息流筛选器。老张是服务端工程师，关注投资、AI、工程实践、宏观变化、Sage 个人项目和个人效率。',
+    '',
+    '任务：判断每条内容是否值得在 FreshRSS 里优先阅读。',
+    '',
+    '判定标准：',
+    '- must_read：值得打开看；有新事实、新判断、清晰假设、风险/机会、工程经验、AI 趋势、投资线索，或短内容但信息密度高。',
+    '- skim：可能有用但不紧急；观点一般、信息不完整、需要结合上下文。',
+    '- skip：广告、转发抽奖、纯情绪、低信息密度、离主题远、重复、无明确观点。',
+    '',
+    '注意：不要因为内容短就自动 skip；对作者碎片化表达，要看是否有明确判断或可跟踪线索。不要为了覆盖率提高优先级，宁可保守。',
+    '只根据给定内容判断，不要调用工具，不要访问网页。',
+    '',
+    '待分类内容 JSON：',
+    JSON.stringify({ items }, null, 2),
+  ].join('\n');
+}
+
+function validateBatchOutput(raw: string, expectedIds: string[]): BatchOutput {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  if (!isObject(parsed) || !Array.isArray(parsed.items)) {
+    throw new Error('output must be object with items array');
+  }
+
+  const expected = new Set(expectedIds);
+  const seen = new Set<string>();
+  const items: BatchItemOutput[] = [];
+
+  for (const rawItem of parsed.items) {
+    if (!isObject(rawItem)) throw new Error('item must be object');
+    const id = stringField(rawItem, 'id', 80);
+    if (!expected.has(id)) throw new Error(`unexpected item id: ${id}`);
+    if (seen.has(id)) throw new Error(`duplicate item id: ${id}`);
+    seen.add(id);
+
+    const priority = enumField(rawItem, 'priority', PRIORITIES);
+    const topics = topicsField(rawItem);
+    const confidence = numberField(rawItem, 'confidence', 0, 1);
+    const reason = stringField(rawItem, 'reason', 300);
+    const summary = stringField(rawItem, 'summary', 300);
+    const factOrOpinion = enumField(rawItem, 'fact_or_opinion', FACT_OR_OPINION);
+
+    items.push({
+      id,
+      priority,
+      topics,
+      confidence,
+      reason,
+      summary,
+      fact_or_opinion: factOrOpinion,
+    });
+  }
+
+  for (const id of expectedIds) {
+    if (!seen.has(id)) throw new Error(`missing item id: ${id}`);
+  }
+
+  return { items };
+}
+
+function topicsField(item: Record<string, unknown>): RssTopic[] {
+  const value = item.topics;
+  if (!Array.isArray(value)) throw new Error('topics must be array');
+  const topics = value.filter((topic): topic is RssTopic => typeof topic === 'string' && TOPICS.includes(topic as RssTopic));
+  const unique = [...new Set(topics)].slice(0, 2);
+  if (unique.length === 0) throw new Error('topics must include at least one known topic');
+  return unique;
+}
+
+function stringField(item: Record<string, unknown>, key: string, maxLength: number): string {
+  const value = item[key];
+  if (typeof value !== 'string') throw new Error(`${key} must be string`);
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error(`${key} must not be empty`);
+  return trimmed.slice(0, maxLength);
+}
+
+function numberField(item: Record<string, unknown>, key: string, min: number, max: number): number {
+  const value = item[key];
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${key} must be number`);
+  return Math.max(min, Math.min(max, value));
+}
+
+function enumField<T extends readonly string[]>(item: Record<string, unknown>, key: string, values: T): T[number] {
+  const value = item[key];
+  if (typeof value !== 'string' || !values.includes(value)) {
+    throw new Error(`${key} must be one of ${values.join(',')}`);
+  }
+  return value as T[number];
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseReasoningEffort(value: string): 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' {
+  if (['minimal', 'low', 'medium', 'high', 'xhigh'].includes(value)) {
+    return value as 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  }
+  return 'low';
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
+function parseNonNegativeInt(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return Math.floor(parsed);
 }
 
 function normalizeText(text: string): string {
@@ -176,3 +229,33 @@ function normalizeText(text: string): string {
     .replace(/\s+/g, ' ')
     .trim();
 }
+
+const RSS_BATCH_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['items'],
+  properties: {
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'priority', 'topics', 'confidence', 'reason', 'summary', 'fact_or_opinion'],
+        properties: {
+          id: { type: 'string' },
+          priority: { type: 'string', enum: PRIORITIES },
+          topics: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 2,
+            items: { type: 'string', enum: TOPICS },
+          },
+          confidence: { type: 'number', minimum: 0, maximum: 1 },
+          reason: { type: 'string', minLength: 1, maxLength: 300 },
+          summary: { type: 'string', minLength: 1, maxLength: 300 },
+          fact_or_opinion: { type: 'string', enum: FACT_OR_OPINION },
+        },
+      },
+    },
+  },
+};

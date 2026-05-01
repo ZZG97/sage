@@ -26,6 +26,17 @@ export interface AgentResponse {
   metadata?: Record<string, unknown>;
 }
 
+export interface StructuredAgentInput {
+  prompt: string;
+  outputSchema: unknown;
+  signal?: AbortSignal;
+}
+
+export interface StructuredAgentResponse {
+  raw: string;
+  usage?: Record<string, unknown> | null;
+}
+
 // 流式结束事件（sendMessageStream 最后 yield）
 export interface AgentResultEvent extends AgentEvent {
   type: 'result';
@@ -51,6 +62,9 @@ export interface AgentProvider {
 
   /** 流式发送消息，逐步 yield AgentEvent，最后 yield type='result' 事件 */
   sendMessageStream(sessionId: string, message: string, signal?: AbortSignal): AsyncGenerator<AgentEvent>;
+
+  /** 运行一次结构化任务。Provider 可选实现；用于 JSON/schema 类后台任务。 */
+  runStructured?(input: StructuredAgentInput): Promise<StructuredAgentResponse>;
 
   /** 删除会话 */
   deleteSession(sessionId: string): Promise<void>;

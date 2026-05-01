@@ -33,6 +33,7 @@ export interface LabelResult {
   topics: RssTopic[];
   confidence: number;
   reason: string;
+  summary?: string;
   fact_or_opinion: 'fact' | 'opinion' | 'mixed' | 'unknown';
   model: string;
 }
@@ -63,4 +64,6 @@ export interface RssWorkerOptions {
   feedLimit: number;
   sinceHours: number;
   dryRun: boolean;
+  refreshOutputFeeds: boolean;
+  outputFeedIds: number[];
 }

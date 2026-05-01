@@ -17,6 +17,14 @@ async function main(): Promise<void> {
       reason: item.reason,
       newArticles: item.newArticles,
     })),
+    outputRefreshed: result.outputRefreshed.map((item) => ({
+      feedId: item.feedId,
+      feedName: item.feedName,
+      domain: item.domain,
+      ok: item.ok,
+      reason: item.reason,
+      newArticles: item.newArticles,
+    })),
     labeled: result.labeled,
   }, null, 2));
 }
@@ -29,6 +37,8 @@ function parseArgs(args: string[]): RssWorkerOptions {
     feedLimit: 5,
     sinceHours: 48,
     dryRun: false,
+    refreshOutputFeeds: true,
+    outputFeedIds: parseNumberList(process.env.RSS_AI_OUTPUT_FEED_IDS),
   };
 
   for (let i = 0; i < args.length; i += 1) {
@@ -47,6 +57,15 @@ function parseArgs(args: string[]): RssWorkerOptions {
         break;
       case '--dry-run':
         options.dryRun = true;
+        break;
+      case '--no-output-refresh':
+        options.refreshOutputFeeds = false;
+        break;
+      case '--output-feed-id':
+        options.outputFeedIds.push(parseNumberArg(args[++i], '--output-feed-id'));
+        break;
+      case '--output-feed-ids':
+        options.outputFeedIds.push(...parseNumberList(args[++i], '--output-feed-ids'));
         break;
       case '--limit':
         options.limit = parseNumberArg(args[++i], '--limit');
@@ -73,6 +92,15 @@ function parseNumberArg(value: string | undefined, name: string): number {
     throw new Error(`${name} 需要正数`);
   }
   return Math.floor(number);
+}
+
+function parseNumberList(value: string | undefined, name = 'number list'): number[] {
+  if (!value) return [];
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .map((item) => parseNumberArg(item, name));
 }
 
 main().catch((error) => {

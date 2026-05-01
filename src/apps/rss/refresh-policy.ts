@@ -41,6 +41,18 @@ export function getDomainFailureLimit(domain: FeedDomain): number {
   return DOMAIN_FAILURE_LIMIT[domain];
 }
 
+export function decideDomainBackoff(state: RefreshState | null, nowSeconds = Math.floor(Date.now() / 1000)): RefreshDecision {
+  if (state?.backoff_until && state.backoff_until > nowSeconds) {
+    return {
+      allowed: false,
+      reason: 'domain_backoff',
+      waitSeconds: state.backoff_until - nowSeconds,
+    };
+  }
+
+  return { allowed: true, reason: 'eligible', waitSeconds: 0 };
+}
+
 export function decideRefresh(feed: FreshRssFeed, state: RefreshState | null, nowSeconds = Math.floor(Date.now() / 1000)): RefreshDecision {
   if (feed.error) {
     return { allowed: false, reason: 'feed_marked_error', waitSeconds: 0 };
@@ -49,7 +61,7 @@ export function decideRefresh(feed: FreshRssFeed, state: RefreshState | null, no
   if (state?.backoff_until && state.backoff_until > nowSeconds) {
     return {
       allowed: false,
-      reason: 'domain_backoff',
+      reason: 'feed_backoff',
       waitSeconds: state.backoff_until - nowSeconds,
     };
   }
@@ -60,7 +72,7 @@ export function decideRefresh(feed: FreshRssFeed, state: RefreshState | null, no
     if (elapsed < interval) {
       return {
         allowed: false,
-        reason: 'domain_interval',
+        reason: 'feed_interval',
         waitSeconds: interval - elapsed,
       };
     }

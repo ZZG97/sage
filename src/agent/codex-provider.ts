@@ -3,7 +3,7 @@
 
 import { Codex, Thread } from '@openai/codex-sdk';
 import type { ThreadEvent, ThreadItem } from '@openai/codex-sdk';
-import { AgentProvider, AgentSession, AgentResponse, AgentEvent, CodexProviderConfig } from './types';
+import { AgentProvider, AgentSession, AgentResponse, AgentEvent, CodexProviderConfig, StructuredAgentInput, StructuredAgentResponse } from './types';
 import { Logger } from '../utils';
 
 export class CodexProvider implements AgentProvider {
@@ -166,6 +166,31 @@ export class CodexProvider implements AgentProvider {
       this.logger.error(`Codex 调用失败: ${error.message}`);
       throw error;
     }
+  }
+
+  async runStructured(input: StructuredAgentInput): Promise<StructuredAgentResponse> {
+    const thread = this.codex.startThread({
+      model: this.model,
+      sandboxMode: 'read-only',
+      workingDirectory: this.workDir,
+      approvalPolicy: 'never',
+      skipGitRepoCheck: true,
+      modelReasoningEffort: this.reasoningEffort,
+      webSearchMode: 'disabled',
+      webSearchEnabled: false,
+      networkAccessEnabled: false,
+    });
+
+    this.logger.info(`调用 Codex structured, prompt 长度: ${input.prompt.length}`);
+    const result = await thread.run(input.prompt, {
+      outputSchema: input.outputSchema,
+      signal: input.signal,
+    });
+
+    return {
+      raw: result.finalResponse,
+      usage: result.usage ? { ...result.usage } : null,
+    };
   }
 
   getResumeId(sessionId: string): string | undefined {
