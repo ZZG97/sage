@@ -20,6 +20,9 @@
     "prod:restart": "pm2 restart sage",
     "prod:logs": "pm2 logs sage --lines 50",
     "prod:status": "pm2 show sage",
+    "rss:ai": "bun run src/apps/rss/worker.ts --once",
+    "rss:ai:dry": "bun run src/apps/rss/worker.ts --once --dry-run",
+    "rss:ai:refresh": "bun run src/apps/rss/worker.ts --once --refresh",
     "sync:prompts": "cd agent_home && python3 scripts/render_agents.py",
     "check:prompts": "cd agent_home && python3 scripts/render_agents.py --check"
   },
