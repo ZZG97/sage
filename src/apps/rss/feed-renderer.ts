@@ -26,7 +26,7 @@ ${renderedItems}
 }
 
 function renderItem(item: AiFeedItem): string {
-  const title = `${labelPrefix(item.labels)} ${stripHtml(item.title)}`.trim();
+  const title = item.title;
   const pubDate = item.published_at
     ? new Date(item.published_at * 1000).toUTCString()
     : parseLocalDate(item.processed_at).toUTCString();
@@ -37,17 +37,7 @@ function renderItem(item: AiFeedItem): string {
   const originalContent = item.content || escapeHtml(item.title);
   const body = [
     '<!-- SAGE_AI_BEGIN -->',
-    '<div class="sage-ai" data-sage-ai="true">',
-    '<h2>AI 摘要</h2>',
-    `<p>${escapeHtml(item.summary || '无摘要')}</p>`,
-    '<h2>判断理由</h2>',
-    `<p>${escapeHtml(item.reason)}</p>`,
-    `<p><strong>标签：</strong>${escapeHtml(item.labels.join(' / '))}</p>`,
-    `<p><strong>来源：</strong>${escapeHtml(item.feed_name)}${item.author ? ` / ${escapeHtml(item.author)}` : ''}</p>`,
-    `<p><strong>原文时间：</strong>${escapeHtml(originalPubDate)}</p>`,
-    `<p><strong>AI 处理时间：</strong>${escapeHtml(aiProcessedAt)}</p>`,
-    `<p><strong>原文链接：</strong><a href="${escapeAttr(item.link)}">${escapeHtml(item.link)}</a></p>`,
-    '</div>',
+    renderAiBlock(item, originalPubDate, aiProcessedAt),
     '<!-- SAGE_AI_END -->',
     '<hr>',
     originalContent,
@@ -64,10 +54,22 @@ ${item.labels.map((label) => `      <category>${escapeXml(label)}</category>`).j
     </item>`;
 }
 
-function labelPrefix(labels: string[]): string {
-  return labels
-    .map((label) => `[${label.replace(/^主题·/, '')}]`)
-    .join('');
+function renderAiBlock(item: AiFeedItem, originalPubDate: string, aiProcessedAt: string): string {
+  const source = `${item.feed_name}${item.author ? ` / ${item.author}` : ''}`;
+  const labels = item.labels.length > 0 ? item.labels.join(' / ') : '无';
+
+  return [
+    '<div class="sage-ai" data-sage-ai="true" style="margin:0 0 16px 0;padding:12px 14px;border:1px solid #dbeafe;border-left:4px solid #2563eb;border-radius:8px;background:#f8fafc;color:#0f172a;font-size:14px;line-height:1.7;">',
+    '<div style="margin:0 0 8px 0;color:#2563eb;font-size:12px;font-weight:700;letter-spacing:0;">Sage AI</div>',
+    `<p style="margin:0 0 10px 0;"><strong style="color:#0f172a;">摘要：</strong>${escapeHtml(item.summary || '无摘要')}</p>`,
+    `<p style="margin:0 0 10px 0;color:#334155;"><strong style="color:#0f172a;">理由：</strong>${escapeHtml(item.reason)}</p>`,
+    '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #e2e8f0;color:#475569;font-size:12px;line-height:1.6;">',
+    `<div><strong>标签：</strong>${escapeHtml(labels)}</div>`,
+    `<div><strong>来源：</strong>${escapeHtml(source)}</div>`,
+    `<div><strong>AI 处理：</strong>${escapeHtml(aiProcessedAt)}</div>`,
+    '</div>',
+    '</div>',
+  ].join('\n');
 }
 
 function parseLocalDate(value: string): Date {
