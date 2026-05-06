@@ -9,6 +9,9 @@ Sage is the core project in this workspace. Repo root is `~/workspace/sage`; cur
 
 For browser/Playwright work, first read `memory/browser.md`.
 
+## Public Exposure Safety
+- Treat any Internet-facing exposure as sensitive. Never expose `agent_home/`, workspace roots, `memory/`, `workspace/uploads/`, or broad local paths through ad-hoc file servers, tunnels, or similar tooling. Prefer exposing a single intended local service port or a dedicated empty/test directory, and state residual risk before any broader public exposure.
+
 ## Folder Structure
 ```
 ├── AGENTS.md              # Generic agent prompt; generated from templates

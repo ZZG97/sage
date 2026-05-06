@@ -3,10 +3,12 @@ name: rss-manager
 description: >
   Manage RSS and RSSHub-backed information intake. Use when the user says "读一下RSS", "帮我汇总今天的订阅",
   "RSS digest", "今日资讯", "信息汇总", asks to read/analyze RSS feeds, add/remove/expand subscriptions,
+  discuss a specific RSS item or original post/article link from subscribed sources, inspect RSS AI labels/reasons,
   create RSSHub routes for sites/accounts/topics, modify or debug a local RSSHub deployment, or organize fetched RSS
   content into a digest. This skill covers RSSHub config, subscription scope management, fetch/dedup/split,
-  analysis, and final reporting. Do not trigger for a one-off web lookup unless the user wants it added to RSS
-  intake or included in a feed digest workflow.
+  specific-link lookup in FreshRSS/RSS AI databases, analysis, and final reporting. Do not trigger for a one-off web
+  lookup unless the user marks it as RSS content, it matches a subscribed source, or wants it added to RSS intake or
+  included in a feed digest workflow.
 user_invocable: true
 ---
 
@@ -23,6 +25,7 @@ Read only the reference needed for the user's current request:
 - Adding/removing feeds, expanding subscription coverage, turning sites/accounts into RSSHub URLs: `references/subscriptions.md`
 - Zhihu followee inventory, partially subscribed Zhihu accounts, batch additions from the followee list: `references/zhihu-followees.md`
 - Running the digest, deduplicating, splitting work, summarizing and reporting fetched content: `references/content-digest.md`
+- Looking up a specific RSS item by original link for label feedback or content discussion: `references/link-lookup.md`
 
 If a request spans multiple areas, read them in this order: config first, subscriptions second, digest last.
 
@@ -32,6 +35,7 @@ If a request spans multiple areas, read them in this order: config first, subscr
 - "订阅某个人/站点/关键词", "增加订阅范围", "把这些源加进去", "RSSHub 怎么订阅 X": read `references/subscriptions.md`.
 - "知乎关注列表", "继续加知乎关注", "从我的知乎关注里挑订阅": read `references/zhihu-followees.md` after `references/subscriptions.md`.
 - "读一下 RSS", "今日资讯", "汇总订阅", "整理今天内容": read `references/content-digest.md`.
+- "这条 RSS", "这条不该略过/必读/可看", "根据链接找 RSS 原记录", "讨论这条内容": read `references/link-lookup.md`.
 
 ## Current Data Flow
 
