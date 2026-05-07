@@ -54,10 +54,6 @@ export function decideDomainBackoff(state: RefreshState | null, nowSeconds = Mat
 }
 
 export function decideRefresh(feed: FreshRssFeed, state: RefreshState | null, nowSeconds = Math.floor(Date.now() / 1000)): RefreshDecision {
-  if (feed.error) {
-    return { allowed: false, reason: 'feed_marked_error', waitSeconds: 0 };
-  }
-
   if (state?.backoff_until && state.backoff_until > nowSeconds) {
     return {
       allowed: false,
