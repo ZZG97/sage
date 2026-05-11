@@ -23,6 +23,7 @@ Read only the reference needed for the user's current request:
 
 - RSSHub deployment/config changes, route debugging, local instance checks: `references/rsshub-config.md`
 - Adding/removing feeds, expanding subscription coverage, turning sites/accounts into RSSHub URLs: `references/subscriptions.md`
+- Listing/removing subscriptions already managed by FreshRSS, checking API capability on this host: `references/freshrss-api.md`
 - Zhihu followee inventory, partially subscribed Zhihu accounts, batch additions from the followee list: `references/zhihu-followees.md`
 - Running the digest, deduplicating, splitting work, summarizing and reporting fetched content: `references/content-digest.md`
 - Looking up a specific RSS item by original link for label feedback or content discussion: `references/link-lookup.md`
@@ -33,6 +34,7 @@ If a request spans multiple areas, read them in this order: config first, subscr
 
 - "RSSHub 跑不起来", "改 RSSHub 配置", "雪球路由 503", "换镜像", "加 cookie": read `references/rsshub-config.md`.
 - "订阅某个人/站点/关键词", "增加订阅范围", "把这些源加进去", "RSSHub 怎么订阅 X": read `references/subscriptions.md`.
+- "列出订阅源", "FreshRSS 里有哪些订阅", "删掉某个 FreshRSS 订阅", "按分类看订阅": read `references/freshrss-api.md`.
 - "知乎关注列表", "继续加知乎关注", "从我的知乎关注里挑订阅": read `references/zhihu-followees.md` after `references/subscriptions.md`.
 - "读一下 RSS", "今日资讯", "汇总订阅", "整理今天内容": read `references/content-digest.md`.
 - "这条 RSS", "这条不该略过/必读/可看", "根据链接找 RSS 原记录", "讨论这条内容": read `references/link-lookup.md`.
@@ -58,6 +60,14 @@ Scheduler workflow integration (2026-04-22):
   chunk paths, and artifact file paths from the workflow context.
 - When the scheduler/workflow already provides fetch artifacts, do **not** rerun `fetch_items.sh`; analyze the provided
   outputs directly and treat the fetch step as already completed.
+
+FreshRSS management helper:
+
+```bash
+python3 ./.claude/skills/rss-manager/scripts/freshrss_api.py list-feeds --show-urls
+```
+
+Use it for feed inventory and removal requests before touching `~/.rsshub/feeds.txt` or SQLite directly.
 
 ## Error Handling
 

@@ -11,6 +11,10 @@ The fetch script reads feeds from:
 
 Prefer `~/.rsshub/feeds.txt` for user-level subscriptions. Create the directory if missing.
 
+Do not assume `~/.rsshub/feeds.txt` is the source of truth for all current subscriptions. In this workspace, many feeds
+have already been migrated into FreshRSS and should be inspected via `scripts/freshrss_api.py` first. Use this file for
+legacy/manual RSSHub feed lists that still participate in the old fetch pipeline.
+
 Format:
 
 ```text
@@ -99,3 +103,11 @@ rg -n 'keyword|domain|route' ~/.rsshub/feeds.txt
 ```
 
 Remove stale feeds with `apply_patch`. Preserve comments and ordering unless cleanup is requested.
+
+If the request is to remove or inspect a feed already managed by FreshRSS, read `references/freshrss-api.md` and use:
+
+```bash
+python3 ./.claude/skills/rss-manager/scripts/freshrss_api.py list-feeds --show-urls
+```
+
+Only edit `~/.rsshub/feeds.txt` when the target really lives in that file.
