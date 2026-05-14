@@ -142,7 +142,11 @@ export class FeishuService {
     this.eventDispatcher
       .register({
         'im.message.receive_v1': async (data: any) => {
-          await this.handleMessage(data as FeishuMessage);
+          // Feishu long-connection handlers should ACK quickly.
+          // Full agent processing can exceed Feishu's retry threshold, so run it in background.
+          this.handleMessage(data as FeishuMessage).catch((err) => {
+            this.logger.error('异步处理消息失败:', err);
+          });
         },
       })
       .register({

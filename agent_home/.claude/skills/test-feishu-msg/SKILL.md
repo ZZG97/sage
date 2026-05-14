@@ -42,7 +42,7 @@ Wait 2s, verify port 9222 is listening.
 **Always use pm2 to manage the `sage-dev` instance. NEVER start a raw `bun` process or kill processes by port/pid — that risks killing the prod `sage` instance.**
 
 ```bash
-cd /Users/zhangzhiguo/workspace/sage && pm2 restart sage-dev
+cd /Users/zhangzhiguo/workspace/sage && bun run dev:restart
 ```
 
 Wait 3s, then verify startup:
@@ -54,7 +54,7 @@ tail -20 /Users/zhangzhiguo/workspace/sage/logs/sage-dev.log
 Look for "启动成功". If `sage-dev` is not in pm2 list yet, start it first:
 
 ```bash
-cd /Users/zhangzhiguo/workspace/sage && pm2 start ecosystem.config.cjs --only sage-dev
+cd /Users/zhangzhiguo/workspace/sage && bun run dev:restart
 ```
 
 ### 3. Open Feishu & Navigate to OWL
@@ -134,7 +134,7 @@ These are hard-won insights — do NOT skip them.
 ### Dev vs Prod Separation
 - **sage** (prod): port 3000, `.env`, managed by pm2, logs at `logs/sage.log`
 - **sage-dev** (dev): port 3001, `.env.dev`, managed by pm2, logs at `logs/sage-dev.log`
-- **ALWAYS** use `pm2 restart sage-dev` for testing — never start a raw bun process
+- **ALWAYS** use `bun run dev:restart` for testing — never start a raw bun process
 - **NEVER** kill processes by grep pattern (`bun.*src/index.ts`) or by port (`lsof -i :3000 | kill`) — this will take down prod
 - If port 3001 is already in use, that IS sage-dev — just `pm2 restart sage-dev`
 
