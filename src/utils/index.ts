@@ -3,6 +3,7 @@ export * from './request-context';
 
 const DEFAULT_LOG_VALUE_MAX = 240;
 const DEFAULT_LOG_ARG_MAX = 2_000;
+const LOG_TIMESTAMP_ENABLED = process.env.SAGE_LOG_TIMESTAMP !== 'false';
 
 function truncate(value: string, maxLength: number): string {
   if (value.length <= maxLength) return value;
@@ -98,7 +99,9 @@ export class Logger {
   }
 
   private write(level: string, sink: (...data: any[]) => void, message: string, args: any[]) {
-    const prefix = `[${new Date().toISOString()}] [${level}] [${this.context}]`;
+    const prefix = LOG_TIMESTAMP_ENABLED
+      ? `[${new Date().toISOString()}] [${level}] [${this.context}]`
+      : `[${level}] [${this.context}]`;
     const context = formatRequestContext();
     const parts = context
       ? [prefix, context, sanitizeLogValue(message, DEFAULT_LOG_ARG_MAX)]

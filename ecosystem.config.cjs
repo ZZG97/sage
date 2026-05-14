@@ -2,14 +2,21 @@ module.exports = {
   apps: [
     {
       name: 'sage',
-      // 防休眠命令
-      script: 'caffeinate',
-      args: '-i bun --env-file .env src/index.ts',
+      script: 'bun',
+      args: [
+        'scripts/launch-sage.ts',
+        '--env-file',
+        '.env',
+        '--instance',
+        'sage',
+        '--',
+        'caffeinate',
+        '-i',
+        'bun',
+        'src/index.ts'
+      ],
       cwd: __dirname,
-      env: {
-        CLAUDE_CODE_WORK_DIR: __dirname + '/agent_home',
-        CODEX_WORK_DIR: __dirname + '/agent_home',
-      },
+      env: {},
       restart_delay: 3000,
       max_restarts: 10,
       kill_timeout: 35000, // 给 drain 30s + 5s 余量
@@ -19,13 +26,21 @@ module.exports = {
     },
     {
       name: 'sage-dev',
-      script: 'caffeinate',
-      args: '-i bun --no-env-file --env-file .env.dev src/index.ts',
+      script: 'bun',
+      args: [
+        'scripts/launch-sage.ts',
+        '--env-file',
+        '.env.dev',
+        '--instance',
+        'sage-dev',
+        '--',
+        'caffeinate',
+        '-i',
+        'bun',
+        'src/index.ts'
+      ],
       cwd: __dirname,
-      env: {
-        CLAUDE_CODE_WORK_DIR: __dirname + '/agent_home',
-        CODEX_WORK_DIR: __dirname + '/agent_home',
-      },
+      env: {},
       restart_delay: 3000,
       max_restarts: 10,
       kill_timeout: 35000,
