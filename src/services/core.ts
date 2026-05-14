@@ -3,7 +3,7 @@ import { AgentProvider } from '../agent';
 import { FallbackAgentProvider } from '../agent/fallback-provider';
 import type { AgentEvent } from '../agent/types';
 import type { HistoryStore } from './history-store';
-import { Logger, AppError } from '../utils';
+import { Logger, AppError, patchRequestContext, sanitizeLogValue } from '../utils';
 import { appConfig } from '../config';
 import { MessageContext } from '../types';
 import { execSync } from 'child_process';
@@ -106,6 +106,7 @@ export class SageCore {
     }
 
     const conversationId = this.getOrCreateConversation(ctx);
+    patchRequestContext({ conversationId, messageId: ctx.messageId });
 
     // 如果该 conversation 正在处理中，排队等待
     if (this.processingConversations.has(conversationId)) {
@@ -113,7 +114,7 @@ export class SageCore {
       queue.push(ctx);
       this.pendingMessages.set(conversationId, queue);
       this.rememberMessageConversation(ctx.messageId, conversationId);
-      this.logger.info(`消息排队: conversation=${conversationId}, 队列长度=${queue.length}, text="${ctx.text.slice(0, 50)}"`);
+      this.logger.info(`消息排队: conv=${conversationId}, queue=${queue.length}, preview="${sanitizeLogValue(ctx.text, 50)}"`);
       return; // 不阻塞，当前处理完后会自动消费队列
     }
 
@@ -141,7 +142,7 @@ export class SageCore {
           ? `[用户在你处理上一条消息期间追加了1条新消息]\n\n`
           : `[用户在你处理上一条消息期间追加了${queuedMessages.length}条新消息]\n\n`;
 
-        this.logger.info(`消费排队消息: conversation=${conversationId}, 合并${queuedMessages.length}条`);
+        this.logger.info(`消费排队消息: conv=${conversationId}, count=${queuedMessages.length}`);
 
         // 构造合并后的 ctx 用于处理
         const mergedCtx: MessageContext = { ...lastCtx, text: hint + mergedText };
@@ -156,13 +157,21 @@ export class SageCore {
   private async processThreadMessage(ctx: MessageContext, conversationId: string): Promise<void> {
     try {
       this.rememberMessageConversation(ctx.messageId, conversationId);
-      this.logger.info(`处理消息: conversation=${conversationId}, openId=${ctx.openId}, threadId=${ctx.threadId || '无'}, text="${ctx.text.slice(0, 100)}"`);
+      this.logger.info(
+        `处理消息: conv=${conversationId}, msg=${ctx.messageId}, open=${ctx.openId}, thread=${ctx.threadId || '无'}, textLen=${ctx.text.length}, preview="${sanitizeLogValue(ctx.text, 100)}"`
+      );
 
       // 预处理消息
       let processedMessage = this.preprocessMessage(ctx.text);
 
       // 获取或创建 Thread 对应的会话
       const { sessionId, isNew } = await this.getOrCreateAgentSession(conversationId);
+      patchRequestContext({
+        conversationId,
+        messageId: ctx.messageId,
+        sessionId,
+        provider: this.getProviderNameForSession(sessionId),
+      });
 
       // 仅在新会话首条消息时注入主动消息上下文（避免 thread 内每条消息都重复注入）
       const replyRootMessageId = ctx.rootId ?? ctx.parentId;
@@ -294,7 +303,13 @@ export class SageCore {
         displayEvents.push(event);
 
         if ((event as any).metadata?.newSessionId) {
-          newSessionId = (event as any).metadata.newSessionId;
+          const fallbackSessionId = (event as any).metadata.newSessionId as string;
+          newSessionId = fallbackSessionId;
+          patchRequestContext({
+            conversationId,
+            sessionId: fallbackSessionId,
+            provider: this.getProviderNameForSession(fallbackSessionId),
+          });
         }
 
         if (event.type === 'result') {
@@ -827,6 +842,15 @@ export class SageCore {
     return session.id;
   }
 
+  private getProviderNameForSession(sessionId: string): string {
+    if (!(this.agent instanceof FallbackAgentProvider)) return this.agent.name;
+    if (sessionId.startsWith('cdx-')) return 'codex';
+    if (sessionId.startsWith('ccm-')) return 'cc-minimax';
+    if (sessionId.startsWith('cc-')) return 'claude-code';
+    if (sessionId.startsWith('oc-')) return 'opencode';
+    return this.agent.activeProviderName;
+  }
+
   private preprocessMessage(message: string): string {
     return message.trim();
   }
@@ -1029,6 +1053,11 @@ export class SageCore {
       chatId: '',
       chatType: 'p2p',
       agentSessionId: session.id,
+    });
+    patchRequestContext({
+      conversationId,
+      sessionId: session.id,
+      provider: this.getProviderNameForSession(session.id),
     });
 
     this.historyStore.saveUserMessage(conversationId, this.agent.name, prompt, {

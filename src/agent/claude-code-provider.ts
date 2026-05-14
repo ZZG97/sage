@@ -162,7 +162,8 @@ export class ClaudeCodeProvider implements AgentProvider {
               yield event;
             } else if (block.type === 'tool_use') {
               const input = JSON.stringify(block.input ?? {}).slice(0, 150);
-              this.logger.info(`[tool_use] ${block.name}  input: ${input}`);
+              this.logger.info(`[tool_use] ${block.name}`);
+              this.logger.debug(`[tool_input] ${block.name} input=${input}`);
               const event: AgentEvent = {
                 type: 'tool_call',
                 toolName: block.name,
@@ -220,7 +221,8 @@ export class ClaudeCodeProvider implements AgentProvider {
 
     } catch (error: any) {
       this.logger.error(
-        `Claude SDK 调用失败: session=${sessionId}, resume=${sdkSessionId || '无'}, messageLen=${message.length}, error=${error?.message || '未知错误'}`
+        `Claude SDK 调用失败: session=${sessionId}, resume=${sdkSessionId || '无'}, messageLen=${message.length}`,
+        error
       );
       throw error;
     }

@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "bun run src/index.ts",
     "start": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir=dist",
+    "build": "bun build src/index.ts --target=bun --outdir=dist",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
     "lint": "echo 'Linting...' && exit 0",

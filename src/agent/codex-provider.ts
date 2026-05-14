@@ -4,7 +4,7 @@
 import { Codex, Thread } from '@openai/codex-sdk';
 import type { ThreadEvent, ThreadItem } from '@openai/codex-sdk';
 import { AgentProvider, AgentSession, AgentResponse, AgentEvent, CodexProviderConfig, StructuredAgentInput, StructuredAgentResponse } from './types';
-import { Logger } from '../utils';
+import { Logger, sanitizeLogValue } from '../utils';
 
 export class CodexProvider implements AgentProvider {
   readonly name = 'codex';
@@ -163,7 +163,7 @@ export class CodexProvider implements AgentProvider {
 
     } catch (error: any) {
       this.threads.delete(sessionId);
-      this.logger.error(`Codex 调用失败: ${error.message}`);
+      this.logger.error('Codex 调用失败', error);
       throw error;
     }
   }
@@ -264,7 +264,7 @@ export class CodexProvider implements AgentProvider {
         };
 
       case 'command_execution':
-        this.logger.info(`[command] ${item.command} → exit=${item.exit_code}`);
+        this.logger.info(`[command] ${sanitizeLogValue(item.command, 160)} → exit=${item.exit_code}`);
         return {
           type: 'tool_call',
           toolName: 'command',
@@ -301,7 +301,7 @@ export class CodexProvider implements AgentProvider {
         };
 
       case 'web_search':
-        this.logger.info(`[web_search] ${item.query}`);
+        this.logger.info(`[web_search] ${sanitizeLogValue(item.query, 160)}`);
         return {
           type: 'tool_call',
           toolName: 'web_search',
@@ -342,7 +342,7 @@ export class CodexProvider implements AgentProvider {
   private logItemStarted(item: ThreadItem): void {
     switch (item.type) {
       case 'command_execution':
-        this.logger.info(`[command start] ${item.command}`);
+        this.logger.debug(`[command start] ${sanitizeLogValue(item.command, 160)}`);
         break;
       case 'agent_message':
         this.logger.debug(`[message start]`);

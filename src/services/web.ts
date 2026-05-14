@@ -1,10 +1,9 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { logger } from 'hono/logger';
 import { serveStatic } from 'hono/bun';
 import { SageCore } from '../services/core';
 import type { TaskScheduler } from '../services/task-scheduler';
-import { AppError, Logger } from '../utils';
+import { AppError, createRequestId, Logger, normalizeRequestId, runWithRequestContext } from '../utils';
 import { appConfig } from '../config';
 import { mountApps } from '../apps';
 import { existsSync } from 'fs';
@@ -36,11 +35,34 @@ export class WebServer {
     this.app.use('*', cors({
       origin: '*',
       allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-      allowHeaders: ['Content-Type', 'Authorization'],
+      allowHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
+      exposeHeaders: ['X-Request-Id'],
     }));
 
-    // 日志（排除静态资源）
-    this.app.use('*', logger());
+    // 访问日志（排除静态资源和上传附件，保持 Sage Logger 的单行格式）
+    this.app.use('*', async (c, next) => {
+      const path = c.req.path;
+      const shouldLog = !path.startsWith('/assets/') && !path.startsWith('/uploads/');
+      const start = Date.now();
+      const requestId = normalizeRequestId(c.req.header('X-Request-Id')) ?? createRequestId();
+
+      c.header('X-Request-Id', requestId);
+
+      return runWithRequestContext({
+        requestId,
+        source: 'http',
+        method: c.req.method,
+        path,
+      }, async () => {
+        try {
+          await next();
+        } finally {
+          if (shouldLog) {
+            this.logger.info(`HTTP status=${c.res.status} ms=${Date.now() - start}`);
+          }
+        }
+      });
+    });
   }
 
   // 设置路由
@@ -85,7 +107,8 @@ export class WebServer {
       try {
         const body = await c.req.json();
 
-        this.logger.info('收到飞书Webhook事件:', JSON.stringify(body, null, 2));
+        this.logger.debug('收到飞书Webhook事件 raw:', body);
+        this.logger.info('收到飞书Webhook事件');
 
         return c.json({
           success: true,

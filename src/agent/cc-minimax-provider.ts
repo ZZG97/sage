@@ -231,7 +231,8 @@ export class CcMinimaxProvider implements AgentProvider {
               yield { type: 'text', content: block.text, ts: new Date().toISOString(), persist: true };
             } else if (block.type === 'tool_use') {
               const input = JSON.stringify(block.input ?? {}).slice(0, 150);
-              this.logger.info(`[tool_use] ${block.name}  input: ${input}`);
+              this.logger.info(`[tool_use] ${block.name}`);
+              this.logger.debug(`[tool_input] ${block.name} input=${input}`);
               yield {
                 type: 'tool_call',
                 toolName: block.name,
@@ -286,7 +287,8 @@ export class CcMinimaxProvider implements AgentProvider {
 
     } catch (error: any) {
       this.logger.error(
-        `CC-MiniMax 调用失败: session=${sessionId}, resume=${sdkSessionId || '无'}, messageLen=${message.length}, error=${error?.message || '未知错误'}`
+        `CC-MiniMax 调用失败: session=${sessionId}, resume=${sdkSessionId || '无'}, messageLen=${message.length}`,
+        error
       );
       throw error;
     }

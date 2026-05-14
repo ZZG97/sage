@@ -1,3 +1,76 @@
+import { formatRequestContext } from './request-context';
+export * from './request-context';
+
+const DEFAULT_LOG_VALUE_MAX = 240;
+const DEFAULT_LOG_ARG_MAX = 2_000;
+
+function truncate(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function toSingleLine(value: string): string {
+  return value.replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+}
+
+function safeStringify(value: unknown): string {
+  const seen = new WeakSet<object>();
+  return JSON.stringify(value, (_key, val) => {
+    if (typeof val === 'bigint') return val.toString();
+    if (val instanceof Error) {
+      return {
+        name: val.name,
+        message: val.message,
+        stack: val.stack,
+        cause: val.cause,
+      };
+    }
+    if (typeof val === 'object' && val !== null) {
+      if (seen.has(val)) return '[Circular]';
+      seen.add(val);
+    }
+    return val;
+  });
+}
+
+export function sanitizeLogValue(value: unknown, maxLength = DEFAULT_LOG_VALUE_MAX): string {
+  let text: string;
+  if (typeof value === 'string') text = value;
+  else if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') text = String(value);
+  else if (value === null || value === undefined) text = '';
+  else {
+    try {
+      text = safeStringify(value);
+    } catch {
+      text = String(value);
+    }
+  }
+  return truncate(toSingleLine(text), maxLength);
+}
+
+export function maskSensitiveId(value: unknown, keepStart = 6, keepEnd = 4): string {
+  const text = sanitizeLogValue(value, 256);
+  if (!text || text === 'unknown') return text;
+  if (text.length <= keepStart + keepEnd + 2) return '***';
+  return `${text.slice(0, keepStart)}…${text.slice(-keepEnd)}`;
+}
+
+function formatLogArg(arg: unknown): string {
+  if (arg instanceof Error) {
+    return sanitizeLogValue(arg.stack || `${arg.name}: ${arg.message}`, DEFAULT_LOG_ARG_MAX);
+  }
+
+  if (typeof arg === 'string') {
+    return sanitizeLogValue(arg, DEFAULT_LOG_ARG_MAX);
+  }
+
+  try {
+    return sanitizeLogValue(safeStringify(arg), DEFAULT_LOG_ARG_MAX);
+  } catch {
+    return sanitizeLogValue(String(arg), DEFAULT_LOG_ARG_MAX);
+  }
+}
+
 // 日志工具
 export class Logger {
   private context: string;
@@ -7,21 +80,34 @@ export class Logger {
   }
 
   info(message: string, ...args: any[]) {
-    console.log(`[${new Date().toISOString()}] [INFO] [${this.context}] ${message}`, ...args);
+    this.write('INFO', console.log, message, args);
   }
 
   error(message: string, ...args: any[]) {
-    console.error(`[${new Date().toISOString()}] [ERROR] [${this.context}] ${message}`, ...args);
+    this.write('ERROR', console.error, message, args);
   }
 
   warn(message: string, ...args: any[]) {
-    console.warn(`[${new Date().toISOString()}] [WARN] [${this.context}] ${message}`, ...args);
+    this.write('WARN', console.warn, message, args);
   }
 
   debug(message: string, ...args: any[]) {
     if (process.env.NODE_ENV === 'development' || process.env.LOG_LEVEL === 'debug') {
-      console.debug(`[${new Date().toISOString()}] [DEBUG] [${this.context}] ${message}`, ...args);
+      this.write('DEBUG', console.debug, message, args);
     }
+  }
+
+  private write(level: string, sink: (...data: any[]) => void, message: string, args: any[]) {
+    const prefix = `[${new Date().toISOString()}] [${level}] [${this.context}]`;
+    const context = formatRequestContext();
+    const parts = context
+      ? [prefix, context, sanitizeLogValue(message, DEFAULT_LOG_ARG_MAX)]
+      : [prefix, sanitizeLogValue(message, DEFAULT_LOG_ARG_MAX)];
+    for (const arg of args) {
+      const formatted = formatLogArg(arg);
+      if (formatted) parts.push(formatted);
+    }
+    sink(parts.join(' '));
   }
 }
 

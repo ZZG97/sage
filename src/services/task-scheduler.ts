@@ -4,7 +4,7 @@ import { Queue, Worker } from 'bunqueue/client';
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'fs';
 import { resolve } from 'path';
-import { Logger } from '../utils';
+import { createRequestId, Logger, runWithRequestContext } from '../utils';
 import type { AgentProvider } from '../agent/types';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -581,58 +581,67 @@ export class TaskScheduler {
   /** Process a job from the queue */
   private async processJob(job: { data: TaskJobData }): Promise<void> {
     const { type, task_id, kind, message, title, payload } = job.data;
+    const contextKind = type === 'builtin' ? 'builtin' : (kind || 'message');
 
-    if (type === 'builtin') {
-      const handler = this.builtinHandlers.get(task_id);
-      if (!handler) {
-        this.logger.warn(`内置任务 handler 未找到: ${task_id}`);
-        return;
-      }
-      this.logger.info(`执行内置任务: ${task_id}`);
-      const start = Date.now();
-      try {
-        await handler(this.ctx);
-        const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-        this.logger.info(`任务完成: ${task_id} (${elapsed}s)`);
-      } catch (err) {
-        this.logger.error(`任务失败: ${task_id}`, err);
-        throw err;
-      }
-      return;
-    }
-
-    const effectiveKind: DynamicTaskKind = kind || 'message';
-    this.logger.info(`执行动态任务(${effectiveKind}): ${task_id}`);
-
-    try {
-      if (effectiveKind === 'agent') {
-        await this.runAgentPrompt(message || '(空 prompt)', title);
-        this.logger.info(`动态 agent 任务已完成: ${task_id}`);
-      } else if (effectiveKind === 'workflow') {
-        if (!payload) {
-          throw new Error('workflow 任务缺少 payload');
-        }
-        const workflow = normalizeWorkflowPayload(JSON.parse(payload));
-        await this.runWorkflow(task_id, workflow, title || undefined);
-        this.logger.info(`动态 workflow 任务已完成: ${task_id}`);
-      } else {
-        if (!this.ctx.sendMessageToOwner) {
-          this.logger.warn('sendMessageToOwner 未注入，跳过 message 类动态任务');
+    return runWithRequestContext({
+      requestId: createRequestId('job'),
+      source: 'scheduler',
+      taskId: task_id,
+      runId: createRequestId('run'),
+      kind: contextKind,
+    }, async () => {
+      if (type === 'builtin') {
+        const handler = this.builtinHandlers.get(task_id);
+        if (!handler) {
+          this.logger.warn(`内置任务 handler 未找到: ${task_id}`);
           return;
         }
-        await this.ctx.sendMessageToOwner(message || '(空消息)');
-        this.logger.info(`动态消息任务已发送: ${task_id}`);
+        this.logger.info(`执行内置任务: ${task_id}`);
+        const start = Date.now();
+        try {
+          await handler(this.ctx);
+          const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+          this.logger.info(`任务完成: ${task_id} (${elapsed}s)`);
+        } catch (err) {
+          this.logger.error(`任务失败: ${task_id}`, err);
+          throw err;
+        }
+        return;
       }
-    } catch (err) {
-      this.logger.error(`动态任务失败: ${task_id}`, err);
-      throw err;
-    }
 
-    const task = this.getRawDynamicTaskById(task_id);
-    if (task?.trigger_at) {
-      this.db.run("UPDATE dynamic_tasks SET status = 'completed' WHERE id = ?", [task_id]);
-      this.logger.info(`一次性任务已完成: ${task_id}`);
-    }
+      const effectiveKind: DynamicTaskKind = kind || 'message';
+      this.logger.info(`执行动态任务(${effectiveKind}): ${task_id}`);
+
+      try {
+        if (effectiveKind === 'agent') {
+          await this.runAgentPrompt(message || '(空 prompt)', title);
+          this.logger.info(`动态 agent 任务已完成: ${task_id}`);
+        } else if (effectiveKind === 'workflow') {
+          if (!payload) {
+            throw new Error('workflow 任务缺少 payload');
+          }
+          const workflow = normalizeWorkflowPayload(JSON.parse(payload));
+          await this.runWorkflow(task_id, workflow, title || undefined);
+          this.logger.info(`动态 workflow 任务已完成: ${task_id}`);
+        } else {
+          if (!this.ctx.sendMessageToOwner) {
+            this.logger.warn('sendMessageToOwner 未注入，跳过 message 类动态任务');
+            return;
+          }
+          await this.ctx.sendMessageToOwner(message || '(空消息)');
+          this.logger.info(`动态消息任务已发送: ${task_id}`);
+        }
+      } catch (err) {
+        this.logger.error(`动态任务失败: ${task_id}`, err);
+        throw err;
+      }
+
+      const task = this.getRawDynamicTaskById(task_id);
+      if (task?.trigger_at) {
+        this.db.run("UPDATE dynamic_tasks SET status = 'completed' WHERE id = ?", [task_id]);
+        this.logger.info(`一次性任务已完成: ${task_id}`);
+      }
+    });
   }
 
   private async runAgentPrompt(prompt: string, title?: string): Promise<void> {

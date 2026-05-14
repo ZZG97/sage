@@ -1,6 +1,6 @@
 import { createOpencodeClient } from '@opencode-ai/sdk';
 import { OpenCodeSession, OpenCodePromptRequest, OpenCodePromptResponse } from '../types';
-import { Logger, AppError } from '../utils';
+import { Logger, AppError, sanitizeLogValue } from '../utils';
 
 export class OpenCodeService {
   private client: ReturnType<typeof createOpencodeClient>;
@@ -55,7 +55,7 @@ export class OpenCodeService {
   // 发送消息到OpenCode
   async sendMessage(sessionId: string, message: string): Promise<string> {
     try {
-      this.logger.info(`向会话 ${sessionId} 发送消息: ${message}`);
+      this.logger.info(`向会话 ${sessionId} 发送消息: textLen=${message.length}, preview="${sanitizeLogValue(message, 100)}"`);
       
       const promptRequest: OpenCodePromptRequest = {
         parts: [{ type: 'text', text: message }],
@@ -72,7 +72,7 @@ export class OpenCodeService {
 
       // 根据实际API响应结构调整
       const responseText = this.extractResponseText(response.data);
-      this.logger.info(`收到OpenCode回复: ${responseText}`);
+      this.logger.info(`收到OpenCode回复: textLen=${responseText.length}, preview="${sanitizeLogValue(responseText, 100)}"`);
       
       return responseText;
     } catch (error) {

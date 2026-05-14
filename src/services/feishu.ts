@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { BaseConfig, FeishuMessage, FeishuTextContent, MessageContext, MessageAttachment } from '../types';
 import { AgentEvent } from '../agent/types';
-import { Logger, AppError } from '../utils';
+import { createRequestId, Logger, AppError, runWithRequestContext, sanitizeLogValue } from '../utils';
 
 // 上传目录（相对于 agent_home）
 const AGENT_HOME_DIR = path.resolve(process.env.HOME || '', 'workspace/sage/agent_home');
@@ -154,56 +154,66 @@ export class FeishuService {
 
   private async handleMessage(data: FeishuMessage): Promise<void> {
     const { message, sender, event_id } = data as any;
-    this.logger.info('收到消息事件:', JSON.stringify(data, null, 2));
 
-    try {
-      if (this.isDuplicateMessage(event_id)) {
-        this.logger.warn(`检测到重复消息，事件ID: ${event_id}，跳过处理`);
-        return;
-      }
+    return runWithRequestContext({
+      requestId: createRequestId('msg'),
+      source: 'feishu',
+      messageId: message?.message_id,
+    }, async () => {
+      this.logger.debug('收到消息事件 raw:', data);
 
-      // 解析消息内容（支持 text/image/file/post）
-      const parsed = await this.parseMessageContent(message);
-      if (!parsed) {
-        this.logger.warn('无法解析消息内容，类型:', message.message_type);
-        return;
-      }
-
-      const openId = sender?.sender_id?.open_id || 'unknown';
-      const threadId = message.thread_id || undefined;
-
-      this.logger.info(`用户消息: type=${message.message_type}, text="${parsed.text.slice(0, 100)}", openId=${openId}, threadId=${threadId || '无'}, messageId=${message.message_id}`);
-
-      // 立即回复表情
-      this.addReaction(message.message_id, 'THUMBSUP').catch(err => {
-        this.logger.warn('添加表情回复失败:', err);
-      });
-
-      const ctx: MessageContext = {
-        text: parsed.text,
-        openId,
-        chatId: message.chat_id,
-        messageId: message.message_id,
-        chatType: message.chat_type,
-        threadId,
-        rootId: message.root_id || undefined,
-        parentId: message.parent_id || undefined,
-        attachments: parsed.attachments,
-      };
-
-      // SageCore 自行控制卡片生命周期（不再返回 string）
-      if (this.messageHandler) {
-        await this.messageHandler(ctx);
-      }
-
-    } catch (error) {
-      this.logger.error('处理消息失败:', error);
       try {
-        await this.replyCard(message.message_id, this.buildErrorCard('抱歉，处理消息时出现错误，请稍后再试'));
-      } catch (replyError) {
-        this.logger.error('发送错误回复失败:', replyError);
+        if (this.isDuplicateMessage(event_id)) {
+          this.logger.warn(`检测到重复消息，事件ID: ${event_id}，跳过处理`);
+          return;
+        }
+
+        // 解析消息内容（支持 text/image/file/post）
+        const parsed = await this.parseMessageContent(message);
+        if (!parsed) {
+          this.logger.warn('无法解析消息内容，类型:', message.message_type);
+          return;
+        }
+
+        const openId = sender?.sender_id?.open_id || 'unknown';
+        const threadId = message.thread_id || undefined;
+        const textPreview = sanitizeLogValue(parsed.text, 100);
+
+        this.logger.info(
+          `用户消息: type=${message.message_type}, event=${event_id}, open=${openId}, thread=${threadId || '无'}, textLen=${parsed.text.length}, preview="${textPreview}"`
+        );
+
+        // 立即回复表情
+        this.addReaction(message.message_id, 'THUMBSUP').catch(err => {
+          this.logger.warn('添加表情回复失败:', err);
+        });
+
+        const ctx: MessageContext = {
+          text: parsed.text,
+          openId,
+          chatId: message.chat_id,
+          messageId: message.message_id,
+          chatType: message.chat_type,
+          threadId,
+          rootId: message.root_id || undefined,
+          parentId: message.parent_id || undefined,
+          attachments: parsed.attachments,
+        };
+
+        // SageCore 自行控制卡片生命周期（不再返回 string）
+        if (this.messageHandler) {
+          await this.messageHandler(ctx);
+        }
+
+      } catch (error) {
+        this.logger.error('处理消息失败:', error);
+        try {
+          await this.replyCard(message.message_id, this.buildErrorCard('抱歉，处理消息时出现错误，请稍后再试'));
+        } catch (replyError) {
+          this.logger.error('发送错误回复失败:', replyError);
+        }
       }
-    }
+    });
   }
 
   // ─── 消息解析（Phase 1）───
@@ -607,7 +617,7 @@ export class FeishuService {
     }
 
     const file = fs.readFileSync(absPath);
-    this.logger.info(`上传图片: ${absPath}`);
+    this.logger.debug(`上传图片: name=${path.basename(absPath)}, bytes=${file.length}`);
 
     const res = await (this.client.im as any).v1.image.create({
       data: { image_type: 'message', image: file },
@@ -618,7 +628,7 @@ export class FeishuService {
       throw new Error('上传图片失败，无 image_key');
     }
 
-    this.logger.info(`图片上传成功: ${absPath} -> ${imageKey}`);
+    this.logger.info(`图片上传成功: name=${path.basename(absPath)}, imageKey=${imageKey}`);
     return imageKey;
   }
 
@@ -639,7 +649,7 @@ export class FeishuService {
     };
     const fileType = fileTypeMap[ext] ?? 'stream';
 
-    this.logger.info(`上传文件: ${absPath} (type: ${fileType})`);
+    this.logger.debug(`上传文件: name=${fileName}, type=${fileType}`);
 
     const res = await (this.client.im as any).v1.file.create({
       data: { file_type: fileType, file_name: fileName, file },
@@ -650,7 +660,7 @@ export class FeishuService {
       throw new Error('上传文件失败，无 file_key');
     }
 
-    this.logger.info(`文件上传成功: ${absPath} -> ${fileKey}`);
+    this.logger.info(`文件上传成功: name=${fileName}, fileKey=${fileKey}`);
     return fileKey;
   }
 
@@ -679,7 +689,7 @@ export class FeishuService {
         const imageKey = await this.uploadImage(src);
         result = result.replace(full, `![${alt || 'image'}](${imageKey})`);
       } catch (err) {
-        this.logger.warn(`处理图片失败，降级为链接: ${src}`, err);
+        this.logger.warn(`处理图片失败，降级为链接: src=${sanitizeLogValue(src, 160)}`, err);
         result = result.replace(full, `[${alt || '图片'}](${src})`);
       }
     }
@@ -709,9 +719,9 @@ export class FeishuService {
       try {
         const fileKey = await this.uploadFile(filePath);
         await this.sendFileReply(messageId, fileKey);
-        this.logger.info(`文件附件已发送: ${filePath}`);
+        this.logger.info(`文件附件已发送: name=${path.basename(absPath)}`);
       } catch (err) {
-        this.logger.warn(`发送文件附件失败: ${filePath}`, err);
+        this.logger.warn(`发送文件附件失败: name=${path.basename(absPath)}`, err);
       }
     }
   }
@@ -758,7 +768,7 @@ export class FeishuService {
         },
       });
       const messageId = (resp as any)?.data?.message_id || '';
-      this.logger.info(`主动消息发送成功到用户 ${openId}, messageId=${messageId}`);
+      this.logger.info(`主动消息发送成功: open=${openId}, msg=${messageId}`);
       return messageId;
     } catch (error) {
       throw new AppError('发送主动消息失败', 'SEND_PROACTIVE_MESSAGE_FAILED');
@@ -777,7 +787,7 @@ export class FeishuService {
         },
       });
       const messageId = (resp as any)?.data?.message_id || '';
-      this.logger.info(`主动卡片发送成功到用户 ${openId}, messageId=${messageId}`);
+      this.logger.info(`主动卡片发送成功: open=${openId}, msg=${messageId}`);
       return messageId;
     } catch (error) {
       throw new AppError('发送主动卡片失败', 'SEND_PROACTIVE_CARD_FAILED');
