@@ -903,11 +903,12 @@ export class SageCore {
 
   private async getOrCreateAgentSession(conversationId: string): Promise<{ sessionId: string; isNew: boolean }> {
     const row = this.historyStore.getSession(conversationId);
+    const sessionContext = this.buildAgentSessionContext(conversationId);
 
     if (row?.agent_session_id) {
       if (!this.restoredSessions.has(row.agent_session_id)) {
         try {
-          await this.agent.restoreSession(row.agent_session_id, row.resume_id || undefined);
+          await this.agent.restoreSession(row.agent_session_id, row.resume_id || undefined, sessionContext);
           this.restoredSessions.add(row.agent_session_id);
           this.logger.info(`懒恢复会话: ${conversationId} -> ${row.agent_session_id}`);
         } catch (err) {
@@ -916,6 +917,7 @@ export class SageCore {
           return { sessionId, isNew: true };
         }
       } else {
+        await this.agent.updateSessionContext?.(row.agent_session_id, sessionContext);
         this.logger.info(`复用 conversation 会话: ${conversationId} -> ${row.agent_session_id}`);
       }
       return { sessionId: row.agent_session_id, isNew: false };
@@ -926,11 +928,28 @@ export class SageCore {
   }
 
   private async createNewAgentSession(conversationId: string): Promise<string> {
-    const session = await this.agent.createSession();
+    const session = await this.agent.createSession(this.buildAgentSessionContext(conversationId));
     this.restoredSessions.add(session.id);
     this.historyStore.updateAgentSessionId(conversationId, session.id);
     this.logger.info(`创建新 agent 会话: ${conversationId} -> ${session.id} (provider: ${this.agent.name})`);
     return session.id;
+  }
+
+  private buildAgentSessionContext(conversationId: string): {
+    conversationId: string;
+    threadId?: string;
+    openId?: string;
+    chatId?: string;
+    chatType?: string;
+  } {
+    const row = this.historyStore.getSession(conversationId);
+    return {
+      conversationId,
+      threadId: row?.thread_id ?? undefined,
+      openId: row?.open_id ?? undefined,
+      chatId: row?.chat_id ?? undefined,
+      chatType: row?.chat_type ?? undefined,
+    };
   }
 
   private getProviderNameForSession(sessionId: string): string {
@@ -1136,15 +1155,14 @@ export class SageCore {
    * 用于调度器的 agent 类型任务（例如"每天早上帮我汇总 xxx"）。
    */
   async runAgentForOwner(prompt: string, openId: string, title?: string): Promise<void> {
-    const session = await this.agent.createSession();
-    this.restoredSessions.add(session.id);
-
     const conversationId = this.historyStore.createConversation(this.agent.name, {
       openId,
       chatId: '',
       chatType: 'p2p',
-      agentSessionId: session.id,
     });
+    const session = await this.agent.createSession(this.buildAgentSessionContext(conversationId));
+    this.restoredSessions.add(session.id);
+    this.historyStore.updateAgentSessionId(conversationId, session.id);
     patchRequestContext({
       conversationId,
       sessionId: session.id,

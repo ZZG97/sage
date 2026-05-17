@@ -9,6 +9,14 @@ export interface AgentSession {
   metadata?: Record<string, unknown>; // provider 特有的数据
 }
 
+export interface AgentSessionContext {
+  conversationId?: string;
+  threadId?: string;
+  openId?: string;
+  chatId?: string;
+  chatType?: string;
+}
+
 // Agent 事件 — provider 在处理过程中产生的各类事件
 export interface AgentEvent {
   type: string;           // text / tool_call / tool_result / error / 或 provider 自定义
@@ -55,7 +63,7 @@ export interface AgentProvider {
   healthCheck(): Promise<boolean>;
 
   /** 创建新会话 */
-  createSession(): Promise<AgentSession>;
+  createSession(context?: AgentSessionContext): Promise<AgentSession>;
 
   /** 发送消息并获取回复 */
   sendMessage(sessionId: string, message: string): Promise<AgentResponse>;
@@ -65,6 +73,9 @@ export interface AgentProvider {
 
   /** 运行一次结构化任务。Provider 可选实现；用于 JSON/schema 类后台任务。 */
   runStructured?(input: StructuredAgentInput): Promise<StructuredAgentResponse>;
+
+  /** 更新会话上下文；provider 可用它刷新隐式 env / metadata。 */
+  updateSessionContext?(sessionId: string, context: AgentSessionContext): Promise<void> | void;
 
   /** 删除会话 */
   deleteSession(sessionId: string): Promise<void>;
@@ -76,7 +87,7 @@ export interface AgentProvider {
   cleanupSessions(maxAgeMs: number): Promise<number>;
 
   /** 恢复会话（重启后从持久化数据重建） */
-  restoreSession(sessionId: string, resumeId?: string): Promise<AgentSession>;
+  restoreSession(sessionId: string, resumeId?: string, context?: AgentSessionContext): Promise<AgentSession>;
 
   /** 获取会话的 SDK resume ID（用于持久化） */
   getResumeId(sessionId: string): string | undefined;

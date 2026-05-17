@@ -3,7 +3,7 @@
 
 import { Codex, Thread } from '@openai/codex-sdk';
 import type { ThreadEvent, ThreadItem } from '@openai/codex-sdk';
-import { AgentProvider, AgentSession, AgentResponse, AgentEvent, CodexProviderConfig, StructuredAgentInput, StructuredAgentResponse } from './types';
+import { AgentProvider, AgentSession, AgentResponse, AgentEvent, AgentSessionContext, CodexProviderConfig, StructuredAgentInput, StructuredAgentResponse } from './types';
 import { Logger, sanitizeLogValue } from '../utils';
 
 function isAbortError(error: any): boolean {
@@ -14,12 +14,14 @@ export class CodexProvider implements AgentProvider {
   readonly name = 'codex';
 
   private logger: Logger;
-  private codex: Codex;
+  private defaultCodex: Codex;
   private sessions: Map<string, AgentSession> = new Map();
   // sessionId(我们的) -> Codex Thread
   private threads: Map<string, Thread> = new Map();
   // sessionId -> Codex thread_id（用于 resume）
   private threadIds: Map<string, string> = new Map();
+  // sessionId -> 专属 Codex client（用于隔离 env）
+  private codexClients: Map<string, Codex> = new Map();
 
   private workDir: string;
   private model: string;
@@ -36,11 +38,7 @@ export class CodexProvider implements AgentProvider {
     this.sandboxMode = config.sandboxMode ?? 'danger-full-access';
 
     // apiKey 可选：有则用 API key 认证，无则走 ~/.codex/auth.json（ChatGPT 订阅）
-    const codexOptions: Record<string, any> = {};
-    if (process.env.OPENAI_API_KEY) {
-      codexOptions.apiKey = process.env.OPENAI_API_KEY;
-    }
-    this.codex = new Codex(codexOptions);
+    this.defaultCodex = this.createCodexClient();
   }
 
   async initialize(): Promise<void> {
@@ -62,7 +60,7 @@ export class CodexProvider implements AgentProvider {
     }
   }
 
-  async createSession(): Promise<AgentSession> {
+  async createSession(context?: AgentSessionContext): Promise<AgentSession> {
     const id = `cdx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const now = Date.now();
 
@@ -71,6 +69,7 @@ export class CodexProvider implements AgentProvider {
       provider: this.name,
       createdAt: now,
       updatedAt: now,
+      metadata: context ? { sessionContext: context } : undefined,
     };
 
     this.sessions.set(id, session);
@@ -110,10 +109,10 @@ export class CodexProvider implements AgentProvider {
       };
 
       if (existingThreadId) {
-        thread = this.codex.resumeThread(existingThreadId, threadOptions);
+        thread = this.getCodexForSession(sessionId).resumeThread(existingThreadId, threadOptions);
         this.logger.info(`恢复 Codex thread: ${existingThreadId}`);
       } else {
-        thread = this.codex.startThread(threadOptions);
+        thread = this.getCodexForSession(sessionId).startThread(threadOptions);
         this.logger.info('创建新 Codex thread');
       }
       this.threads.set(sessionId, thread);
@@ -177,7 +176,7 @@ export class CodexProvider implements AgentProvider {
   }
 
   async runStructured(input: StructuredAgentInput): Promise<StructuredAgentResponse> {
-    const thread = this.codex.startThread({
+    const thread = this.defaultCodex.startThread({
       model: this.model,
       sandboxMode: 'read-only',
       workingDirectory: this.workDir,
@@ -205,13 +204,29 @@ export class CodexProvider implements AgentProvider {
     return this.threadIds.get(sessionId);
   }
 
-  async restoreSession(sessionId: string, resumeId?: string): Promise<AgentSession> {
+  updateSessionContext(sessionId: string, context: AgentSessionContext): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    const previous = this.getSessionContext(session);
+    if (this.sameSessionContext(previous, context)) return;
+
+    session.metadata = { ...(session.metadata ?? {}), sessionContext: context };
+    this.codexClients.delete(sessionId);
+    this.threads.delete(sessionId);
+    this.logger.info(
+      `更新 Codex session 上下文: session=${sessionId}, conv=${context.conversationId || '无'}, thread=${context.threadId || '无'}`
+    );
+  }
+
+  async restoreSession(sessionId: string, resumeId?: string, context?: AgentSessionContext): Promise<AgentSession> {
     const now = Date.now();
     const session: AgentSession = {
       id: sessionId,
       provider: this.name,
       createdAt: now,
       updatedAt: now,
+      metadata: context ? { sessionContext: context } : undefined,
     };
     this.sessions.set(sessionId, session);
     if (resumeId) {
@@ -226,6 +241,7 @@ export class CodexProvider implements AgentProvider {
     this.sessions.delete(sessionId);
     this.threads.delete(sessionId);
     this.threadIds.delete(sessionId);
+    this.codexClients.delete(sessionId);
     this.logger.info(`会话已删除: ${sessionId}`);
   }
 
@@ -242,6 +258,7 @@ export class CodexProvider implements AgentProvider {
         this.sessions.delete(id);
         this.threads.delete(id);
         this.threadIds.delete(id);
+        this.codexClients.delete(id);
         cleaned++;
       }
     }
@@ -254,7 +271,62 @@ export class CodexProvider implements AgentProvider {
     this.sessions.clear();
     this.threads.clear();
     this.threadIds.clear();
+    this.codexClients.clear();
     this.logger.info('Codex provider 已销毁');
+  }
+
+  private createCodexClient(env?: Record<string, string>): Codex {
+    const codexOptions: Record<string, any> = {};
+    if (process.env.OPENAI_API_KEY) {
+      codexOptions.apiKey = process.env.OPENAI_API_KEY;
+    }
+    if (env) {
+      codexOptions.env = env;
+    }
+    return new Codex(codexOptions);
+  }
+
+  private getCodexForSession(sessionId: string): Codex {
+    const existing = this.codexClients.get(sessionId);
+    if (existing) return existing;
+
+    const session = this.sessions.get(sessionId);
+    const env = this.buildSessionEnv(sessionId, this.getSessionContext(session));
+    const client = this.createCodexClient(env);
+    this.codexClients.set(sessionId, client);
+    return client;
+  }
+
+  private getSessionContext(session: AgentSession | undefined): AgentSessionContext | undefined {
+    const value = session?.metadata?.sessionContext;
+    if (!value || typeof value !== 'object') return undefined;
+    return value as AgentSessionContext;
+  }
+
+  private sameSessionContext(a?: AgentSessionContext, b?: AgentSessionContext): boolean {
+    return a?.conversationId === b?.conversationId
+      && a?.threadId === b?.threadId
+      && a?.openId === b?.openId
+      && a?.chatId === b?.chatId
+      && a?.chatType === b?.chatType;
+  }
+
+  private buildSessionEnv(sessionId: string, context?: AgentSessionContext): Record<string, string> | undefined {
+    const env: Record<string, string> = { ...process.env } as Record<string, string>;
+    env.SAGE_AGENT_PROVIDER = this.name;
+    env.SAGE_AGENT_SESSION_ID = sessionId;
+
+    if (context?.conversationId) env.SAGE_CONVERSATION_ID = context.conversationId;
+    if (context?.threadId) env.SAGE_THREAD_ID = context.threadId;
+    if (context?.openId) env.SAGE_OPEN_ID = context.openId;
+    if (context?.chatId) env.SAGE_CHAT_ID = context.chatId;
+    if (context?.chatType) env.SAGE_CHAT_TYPE = context.chatType;
+
+    if (!context) return env;
+    this.logger.debug(
+      `为 Codex session 注入 env: session=${sessionId}, conv=${context.conversationId || '无'}, thread=${context.threadId || '无'}`
+    );
+    return env;
   }
 
   /** 将 Codex ThreadItem 转换为 AgentEvent */

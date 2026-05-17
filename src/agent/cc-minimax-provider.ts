@@ -3,7 +3,7 @@
 
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKResultError, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
-import { AgentProvider, AgentSession, AgentResponse, AgentEvent, AgentResultEvent, CcMinimaxProviderConfig, MinimaxMcpConfig } from './types';
+import { AgentProvider, AgentSession, AgentResponse, AgentEvent, AgentResultEvent, AgentSessionContext, CcMinimaxProviderConfig, MinimaxMcpConfig } from './types';
 import { Logger } from '../utils';
 
 function isAbortError(error: any): boolean {
@@ -88,7 +88,7 @@ export class CcMinimaxProvider implements AgentProvider {
     }
   }
 
-  async createSession(): Promise<AgentSession> {
+  async createSession(context?: AgentSessionContext): Promise<AgentSession> {
     const id = `ccm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const now = Date.now();
 
@@ -97,6 +97,7 @@ export class CcMinimaxProvider implements AgentProvider {
       provider: this.name,
       createdAt: now,
       updatedAt: now,
+      metadata: context ? { sessionContext: context } : undefined,
     };
 
     this.sessions.set(id, session);
@@ -308,13 +309,14 @@ export class CcMinimaxProvider implements AgentProvider {
     return this.sdkSessionIds.get(sessionId);
   }
 
-  async restoreSession(sessionId: string, resumeId?: string): Promise<AgentSession> {
+  async restoreSession(sessionId: string, resumeId?: string, context?: AgentSessionContext): Promise<AgentSession> {
     const now = Date.now();
     const session: AgentSession = {
       id: sessionId,
       provider: this.name,
       createdAt: now,
       updatedAt: now,
+      metadata: context ? { sessionContext: context } : undefined,
     };
     this.sessions.set(sessionId, session);
     if (resumeId) {

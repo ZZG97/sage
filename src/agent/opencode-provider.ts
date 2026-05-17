@@ -1,7 +1,7 @@
 // OpenCode Provider — 封装现有的 OpenCode 逻辑
 
 import { createOpencodeClient } from '@opencode-ai/sdk';
-import { AgentProvider, AgentSession, AgentResponse, AgentEvent, OpenCodeProviderConfig } from './types';
+import { AgentProvider, AgentSession, AgentResponse, AgentEvent, AgentSessionContext, OpenCodeProviderConfig } from './types';
 import { Logger } from '../utils';
 
 export class OpenCodeProvider implements AgentProvider {
@@ -34,7 +34,7 @@ export class OpenCodeProvider implements AgentProvider {
     }
   }
 
-  async createSession(): Promise<AgentSession> {
+  async createSession(context?: AgentSessionContext): Promise<AgentSession> {
     const response = await this.client.session.create({});
     if (!response.data?.id) {
       throw new Error('创建会话失败：没有返回会话ID');
@@ -46,6 +46,7 @@ export class OpenCodeProvider implements AgentProvider {
       provider: this.name,
       createdAt: now,
       updatedAt: now,
+      metadata: context ? { sessionContext: context } : undefined,
     };
 
     this.sessions.set(session.id, session);
@@ -88,7 +89,7 @@ export class OpenCodeProvider implements AgentProvider {
     return undefined; // OpenCode 无状态
   }
 
-  async restoreSession(sessionId: string, _resumeId?: string): Promise<AgentSession> {
+  async restoreSession(sessionId: string, _resumeId?: string, context?: AgentSessionContext): Promise<AgentSession> {
     // OpenCode 无状态，直接创建 session 对象即可
     const now = Date.now();
     const session: AgentSession = {
@@ -96,6 +97,7 @@ export class OpenCodeProvider implements AgentProvider {
       provider: this.name,
       createdAt: now,
       updatedAt: now,
+      metadata: context ? { sessionContext: context } : undefined,
     };
     this.sessions.set(sessionId, session);
     this.logger.info(`会话恢复: ${sessionId}`);

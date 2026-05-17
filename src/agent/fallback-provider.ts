@@ -1,6 +1,6 @@
 // FallbackAgentProvider — 包装多个 provider，支持手动切换 + 自动降级
 
-import { AgentProvider, AgentSession, AgentResponse, AgentEvent } from './types';
+import { AgentProvider, AgentSession, AgentResponse, AgentEvent, AgentSessionContext } from './types';
 import { Logger } from '../utils';
 
 function isAbortError(error: any): boolean {
@@ -24,6 +24,7 @@ export class FallbackAgentProvider implements AgentProvider {
 
   /** agent_session_id → conversationId 映射，由 SageCore 注册 */
   private sessionToConversation: Map<string, string> = new Map();
+  private sessionContexts: Map<string, AgentSessionContext> = new Map();
   private getRecentHistory?: RecentHistoryFn;
 
   constructor(providerList: AgentProvider[]) {
@@ -98,10 +99,12 @@ export class FallbackAgentProvider implements AgentProvider {
     return false;
   }
 
-  async createSession(): Promise<AgentSession> {
+  async createSession(context?: AgentSessionContext): Promise<AgentSession> {
     const active = this.providers.get(this._activeProviderName)!;
     try {
-      return await active.createSession();
+      const session = await active.createSession(context);
+      if (context) this.sessionContexts.set(session.id, context);
+      return session;
     } catch (err) {
       if (!this._autoFallbackEnabled) throw err;
       // 尝试其他 provider
@@ -110,7 +113,9 @@ export class FallbackAgentProvider implements AgentProvider {
         try {
           const provider = this.providers.get(name)!;
           this.logger.warn(`${this._activeProviderName} createSession 失败，降级到 ${name}:`, err);
-          return await provider.createSession();
+          const session = await provider.createSession(context);
+          if (context) this.sessionContexts.set(session.id, context);
+          return session;
         } catch { /* try next */ }
       }
       throw err;
@@ -158,7 +163,9 @@ export class FallbackAgentProvider implements AgentProvider {
             `${provider.name} sendMessageStream 失败，降级到 ${name}: session=${sessionId}, messageLen=${message.length}, reason=${errSummary}`
           );
 
-          const newSession = await fallback.createSession();
+          const sessionContext = this.sessionContexts.get(sessionId);
+          const newSession = await fallback.createSession(sessionContext);
+          if (sessionContext) this.sessionContexts.set(newSession.id, sessionContext);
           this.logger.warn(`创建降级会话: oldSession=${sessionId}, newSession=${newSession.id}, provider=${name}`);
 
           const enrichedMessage = this.buildFallbackMessage(sessionId, message);
@@ -192,11 +199,19 @@ export class FallbackAgentProvider implements AgentProvider {
     return this.routeProvider(sessionId).getResumeId(sessionId);
   }
 
-  async restoreSession(sessionId: string, resumeId?: string): Promise<AgentSession> {
-    return this.routeProvider(sessionId).restoreSession(sessionId, resumeId);
+  async updateSessionContext(sessionId: string, context: AgentSessionContext): Promise<void> {
+    this.sessionContexts.set(sessionId, context);
+    await this.routeProvider(sessionId).updateSessionContext?.(sessionId, context);
+  }
+
+  async restoreSession(sessionId: string, resumeId?: string, context?: AgentSessionContext): Promise<AgentSession> {
+    const session = await this.routeProvider(sessionId).restoreSession(sessionId, resumeId, context);
+    if (context) this.sessionContexts.set(session.id, context);
+    return session;
   }
 
   async deleteSession(sessionId: string): Promise<void> {
+    this.sessionContexts.delete(sessionId);
     return this.routeProvider(sessionId).deleteSession(sessionId);
   }
 
@@ -213,10 +228,15 @@ export class FallbackAgentProvider implements AgentProvider {
     for (const provider of this.providers.values()) {
       total += await provider.cleanupSessions(maxAgeMs);
     }
+    const activeSessionIds = new Set(this.getActiveSessions().map(session => session.id));
+    for (const sessionId of this.sessionContexts.keys()) {
+      if (!activeSessionIds.has(sessionId)) this.sessionContexts.delete(sessionId);
+    }
     return total;
   }
 
   async destroy(): Promise<void> {
+    this.sessionContexts.clear();
     for (const provider of this.providers.values()) {
       await provider.destroy();
     }
