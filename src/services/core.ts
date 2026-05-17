@@ -580,11 +580,14 @@ export class SageCore {
     );
     await this.feishuService.patchCard(restartCardMsgId, doneCard).catch(() => {});
 
-    // Step 4: 调 pm2 restart，然后进程会被新实例替换
-    this.logger.info(`/restart: drain 完成，执行 pm2 restart ${processName}`);
+    // Step 4: 走 package script 重启，确保手动命令和聊天命令使用同一入口
+    const restartCommand = processName === 'sage-dev'
+      ? 'bun run dev:restart'
+      : 'bun run prod:restart';
+    this.logger.info(`/restart: drain 完成，执行 ${restartCommand}`);
     try {
       // 等待 drain 完成后再 restart，避免 pm2 kill 时 activeCards 还未清空
-      execSync(`pm2 restart ${processName}`, { timeout: 10_000 });
+      execSync(restartCommand, { timeout: 10_000 });
     } catch {
       // restart 会杀自己，这里大概率不会执行到
     }

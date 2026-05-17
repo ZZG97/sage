@@ -17,7 +17,7 @@
     "dev:restart": "pm2 startOrRestart ecosystem.config.cjs --only sage-dev",
     "dev:logs": "pm2 logs sage-dev --lines 50",
     "dev:status": "pm2 show sage-dev",
-    "prod:restart": "pm2 restart sage",
+    "prod:restart": "pm2 startOrRestart ecosystem.config.cjs --only sage --update-env",
     "prod:logs": "pm2 logs sage --lines 50",
     "prod:status": "pm2 show sage",
     "rss:ai": "bun run src/apps/rss/worker.ts --once",

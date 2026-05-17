@@ -26,6 +26,7 @@ async function main(): Promise<void> {
       newArticles: item.newArticles,
     })),
     labeled: result.labeled,
+    labelStats: result.labelStats,
   }, null, 2));
 }
 

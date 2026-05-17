@@ -4,6 +4,7 @@ import { Logger } from '../utils';
 import { createDebugRoutes } from './debug/routes';
 import { createHealthRoutes } from './health/routes';
 import { createManagementRoutes } from './management/routes';
+import { createOperationsRoutes } from './operations/routes';
 import { createRssRoutes } from './rss/routes';
 import type { SageCore } from '../services/core';
 import type { TaskScheduler } from '../services/task-scheduler';
@@ -27,6 +28,7 @@ const apps: AppDefinition[] = [
   { name: 'debug', path: '/apps/debug', createRoutes: () => createDebugRoutes() },
   { name: 'health', path: '/apps/health', createRoutes: () => createHealthRoutes() },
   { name: 'management', path: '/apps/management', createRoutes: (ctx) => createManagementRoutes(ctx.sageCore, ctx.scheduler) },
+  { name: 'operations', path: '/apps/operations', createRoutes: () => createOperationsRoutes() },
   { name: 'rss', path: '/apps/rss', createRoutes: () => createRssRoutes() },
 ];
 

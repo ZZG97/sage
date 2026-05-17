@@ -171,6 +171,7 @@ export class WebServer {
       const serveIndex = serveStatic({ root: './web/dist', path: '/index.html' });
       this.app.get('/', serveIndex);
       this.app.get('/management', serveIndex);
+      this.app.get('/operations', serveIndex);
       this.app.get('/scheduler', serveIndex);
       this.app.get('/health-dashboard', serveIndex);
       this.app.get('/debug', serveIndex);

@@ -5,6 +5,7 @@ import { weeklyConsolidation } from './weekly-consolidation';
 import { eveningGreeting } from './greeting';
 import { dailyWeather } from './weather';
 import { syncSystemPrompts } from './system-prompt-sync';
+import { operationsHealthCheck } from './operations-health';
 
 /** All built-in scheduled tasks */
 export function getBuiltinTasks(): BuiltinTaskDef[] {
@@ -34,6 +35,11 @@ export function getBuiltinTasks(): BuiltinTaskDef[] {
       name: 'system-prompt-sync',
       pattern: '10 3 * * *',     // 每天 03:10 同步 Claude Code / Codex 系统提示
       handler: syncSystemPrompts,
+    },
+    {
+      name: 'operations-health-check',
+      pattern: '*/10 * * * *',    // 每 10 分钟扫描统一任务运行账本
+      handler: operationsHealthCheck,
     },
   ];
 }

@@ -129,6 +129,43 @@ export const schedulerApi = {
     }),
 };
 
+// ─── Operations API ───
+
+export type OperationStatus = 'running' | 'success' | 'warning' | 'failed' | 'cancelled';
+
+export interface OperationRun {
+  id: string;
+  operation_type: string;
+  operation_name: string;
+  trigger_type: 'scheduler' | 'feishu' | 'http' | 'manual';
+  status: OperationStatus;
+  started_at: number;
+  finished_at: number | null;
+  duration_ms: number | null;
+  summary: string | null;
+  metrics: Record<string, number | string | boolean | null>;
+  error: string | null;
+  metadata: Record<string, unknown>;
+  request_id: string | null;
+  trace_id: string | null;
+  alerted_at: number | null;
+}
+
+export interface OperationsSummary {
+  since: number;
+  total: number;
+  running: number;
+  success: number;
+  warning: number;
+  failed: number;
+  cancelled: number;
+}
+
+export const operationsApi = {
+  getSummary: () => request<OperationsSummary>('/apps/operations/summary'),
+  getRuns: (limit = 50) => request<{ runs: OperationRun[] }>(`/apps/operations/runs?limit=${limit}`),
+};
+
 // ─── Health API ───
 
 export interface HealthStats {
