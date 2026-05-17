@@ -1,9 +1,10 @@
-// 快速测试 ClaudeCodeProvider — 直接调 SDK 验证小克身份
-import { ClaudeCodeProvider } from './src/agent/claude-code-provider';
+// 手工探针：直接调 ClaudeCodeProvider 验证 provider 可用性。
+// 不属于默认单测；运行前确认本机 Claude Code 环境和模型配置可用。
+import { ClaudeCodeProvider } from '../../src/agent/claude-code-provider';
 
 const provider = new ClaudeCodeProvider({
   type: 'claude-code',
-  workDir: `${process.env.HOME}/workspace/agent_home`,
+  workDir: `${process.env.HOME}/workspace/sage/agent_home`,
   maxTurns: 5,
   model: 'claude-sonnet-4-6',
 });
@@ -30,7 +31,6 @@ async function test() {
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   console.log(`\n回复 (${elapsed}s):\n${response.text}`);
 
-  // 清理
   await provider.deleteSession(session.id);
   await provider.destroy();
 }
