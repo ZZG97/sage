@@ -199,6 +199,20 @@ logger.info('信息日志');
 logger.error('错误日志');
 ```
 
+### 测试原则
+
+默认测试命令：
+
+```bash
+bun run test
+```
+
+单测优先覆盖纯函数、规则判断和本地渲染逻辑，例如 markdown/card 处理、RSS 刷新策略、workflow payload 校验、日志脱敏等。这类测试应使用 `bun:test`，放在被测代码旁边的 `*.test.ts` 文件中，避免依赖飞书、真实 AI provider、生产数据库或外部网络。
+
+涉及 SQLite 的 service 测试应使用临时数据库或内存数据库，不得读写 `data/*.db` 生产/开发库。涉及 Feishu、Claude/Codex/OpenCode provider 的行为测试应优先 mock 边界接口，只验证 Sage 自己的流转、拆卡、fallback、abort 等逻辑。
+
+会真实调用飞书、AI provider、浏览器或本机环境的脚本属于手工/端到端探针，放在 `scripts/manual/`，不要纳入默认 `bun run test`。
+
 ## 部署
 
 ### 使用Bun运行

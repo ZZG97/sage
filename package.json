@@ -10,6 +10,7 @@
     "start": "bun scripts/launch-sage.ts --env-file .env --instance sage -- bun src/index.ts",
     "build": "bun build src/index.ts --target=bun --outdir=dist",
     "clean": "rm -rf dist",
+    "test": "bun test",
     "typecheck": "tsc --noEmit",
     "lint": "echo 'Linting...' && exit 0",
     "dev:start": "pm2 start ecosystem.config.cjs --only sage-dev",
