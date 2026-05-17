@@ -113,7 +113,7 @@ Meaning:
 
 ## Alerts
 
-`operations-health-check` runs every 10 minutes and sends Feishu alerts for:
+`operations-health-check` runs every 6 hours and sends Feishu alerts for:
 
 - Unalerted `failed` or `warning` runs.
 - `running` runs older than 2 hours.

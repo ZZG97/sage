@@ -38,7 +38,7 @@ export function getBuiltinTasks(): BuiltinTaskDef[] {
     },
     {
       name: 'operations-health-check',
-      pattern: '*/10 * * * *',    // 每 10 分钟扫描统一任务运行账本
+      pattern: '0 */6 * * *',     // 每 6 小时扫描统一任务运行账本
       handler: operationsHealthCheck,
     },
   ];
