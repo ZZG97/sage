@@ -23,6 +23,8 @@ function parseDynamicTaskBody(body: any): DynamicTaskWriteOptions {
     message: content ?? '',
     title: body.title ?? body.topic,
     payload: workflow,
+    context: body.context,
+    reuseConversationId: body.reuseConversationId ?? body.conversationId,
     pattern: body.pattern,
     triggerAt: body.triggerAt,
   };

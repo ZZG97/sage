@@ -21,6 +21,10 @@ interface ActiveRun {
   cancelReason?: string;
 }
 
+interface RunAgentForOwnerOptions {
+  reuseConversationId?: string;
+}
+
 export class SageCore {
   private feishuService: FeishuService;
   private agent: AgentProvider;
@@ -260,10 +264,12 @@ export class SageCore {
     // Step 1: 发送初始 "thinking" 卡片
     const initialCard = this.feishuService.buildStreamingCard([], true);
     let replyMessageId = '';
+    let initialThreadId: string | undefined;
     if (anchor.kind === 'reply') {
       this.rememberMessageConversation(anchor.parentMessageId, conversationId);
       const r = await this.feishuService.replyCard(anchor.parentMessageId, initialCard);
       replyMessageId = r.messageId;
+      initialThreadId = r.threadId;
     } else {
       const topic = this.normalizeProactiveTopic(anchor.title ?? prompt);
       const rootMessageId = await this.feishuService.sendTextToUser(anchor.openId, topic);
@@ -281,6 +287,7 @@ export class SageCore {
 
       const r = await this.feishuService.replyCard(rootMessageId, initialCard);
       replyMessageId = r.messageId;
+      initialThreadId = r.threadId;
     }
 
     if (!replyMessageId) {
@@ -299,6 +306,10 @@ export class SageCore {
     this.activeRuns.set(conversationId, activeRun);
     this.rememberMessageConversation(replyMessageId, conversationId);
     this.activeCards.set(replyMessageId, { conversationId, startTime: Date.now(), abortController });
+
+    if (initialThreadId) {
+      await this.agent.updateSessionContext?.(sessionId, this.buildAgentSessionContext(conversationId));
+    }
 
     // Step 2: 流式处理 agent 消息（含卡片大小保护）
     const allEvents: AgentEvent[] = [];
@@ -1151,10 +1162,15 @@ export class SageCore {
 
   /**
    * 主动触发一次 agent 任务，结果以流式卡片形式发送给 owner。
-   * 每次执行创建独立 session，与现有 thread 不共享上下文。
+   * 默认创建独立 session；传 reuseConversationId 时复用原 conversation/session。
    * 用于调度器的 agent 类型任务（例如"每天早上帮我汇总 xxx"）。
    */
-  async runAgentForOwner(prompt: string, openId: string, title?: string): Promise<void> {
+  async runAgentForOwner(prompt: string, openId: string, title?: string, options?: RunAgentForOwnerOptions): Promise<void> {
+    if (options?.reuseConversationId) {
+      const reused = await this.runAgentInExistingConversation(prompt, options.reuseConversationId);
+      if (reused) return;
+    }
+
     const conversationId = this.historyStore.createConversation(this.agent.name, {
       openId,
       chatId: '',
@@ -1163,6 +1179,7 @@ export class SageCore {
     const session = await this.agent.createSession(this.buildAgentSessionContext(conversationId));
     this.restoredSessions.add(session.id);
     this.historyStore.updateAgentSessionId(conversationId, session.id);
+    this.registerFallbackSessionConversation(session.id, conversationId);
     patchRequestContext({
       conversationId,
       sessionId: session.id,
@@ -1186,6 +1203,54 @@ export class SageCore {
     if (result?.replyMessageId) {
       this.rememberMessageConversation(result.replyMessageId, conversationId);
       this.logger.info(`主动 agent 任务已发送: messageId=${result.replyMessageId}, session=${session.id}`);
+    }
+  }
+
+  private async runAgentInExistingConversation(prompt: string, conversationId: string): Promise<boolean> {
+    const row = this.historyStore.getSession(conversationId);
+    if (!row) {
+      this.logger.warn(`定时 agent 复用 conversation 失败，记录不存在: conversation=${conversationId}`);
+      return false;
+    }
+    if (!row.first_message_id) {
+      this.logger.warn(`定时 agent 复用 conversation 失败，缺少 first_message_id: conversation=${conversationId}`);
+      return false;
+    }
+
+    const { sessionId } = await this.getOrCreateAgentSession(conversationId);
+    this.registerFallbackSessionConversation(sessionId, conversationId);
+    patchRequestContext({
+      conversationId,
+      sessionId,
+      provider: this.getProviderNameForSession(sessionId),
+    });
+
+    const scheduledPrompt = `[定时任务触发]\n\n${prompt}`;
+    this.historyStore.saveUserMessage(conversationId, this.agent.name, scheduledPrompt, {
+      openId: row.open_id ?? undefined,
+      chatId: row.chat_id ?? undefined,
+      chatType: row.chat_type ?? undefined,
+      agentSessionId: sessionId,
+    });
+
+    const result = await this.runAgentToCard({
+      prompt: scheduledPrompt,
+      conversationId,
+      sessionId,
+      sourceMessageIds: [],
+      anchor: { kind: 'reply', parentMessageId: row.first_message_id },
+    });
+
+    if (result?.replyMessageId) {
+      this.rememberMessageConversation(result.replyMessageId, conversationId);
+      this.logger.info(`定时 agent 任务已复用 conversation: conversation=${conversationId}, session=${sessionId}, messageId=${result.replyMessageId}`);
+    }
+    return true;
+  }
+
+  private registerFallbackSessionConversation(sessionId: string, conversationId: string): void {
+    if (this.agent instanceof FallbackAgentProvider) {
+      this.agent.registerSessionConversation(sessionId, conversationId);
     }
   }
 }

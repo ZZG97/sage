@@ -51,7 +51,8 @@ class Application {
           ? (text: string) => this.sageCore.sendProactiveMessage(ownerOpenId, text)
           : undefined,
         runAgentTask: ownerOpenId
-          ? (prompt: string, title?: string) => this.sageCore.runAgentForOwner(prompt, ownerOpenId, title)
+          ? (prompt: string, title?: string, options?: { reuseConversationId?: string }) =>
+            this.sageCore.runAgentForOwner(prompt, ownerOpenId, title, options)
           : undefined,
       }, isDev);
       if (!ownerOpenId) {

@@ -33,6 +33,7 @@ user_invocable: true
   "kind": "message",            // 'message'(默认,纯文本提醒) | 'agent'(触发 agent 对话) | 'workflow'(线性 step 工作流)
   "message": "要发送的消息、prompt，或 workflow 的人类可读摘要",
   "title": "任务标题",            // agent/workflow 可选
+  "reuseConversationId": "conv_xxx", // agent/workflow 可选；到点后复用该 conversation/session 并回到原飞书话题
   "workflow": {                  // kind='workflow' 时必填
     "version": 1,
     "steps": [
@@ -47,15 +48,24 @@ user_invocable: true
 
 - `kind`（可选，默认 `message`）：
   - `message` — 到点直接发一条飞书纯文本。便宜、快，适合"提醒我吃药""30分钟后叫我起床"这种静态提醒。
-  - `agent` — 到点触发一次完整的 agent 对话，结果以**流式卡片**形式发送（和用户主动对话体验一致，能看到思考/工具调用过程）。适合"每天早上帮我汇总 GitHub notifications""每周五生成工作总结"这种需要实时计算或联网的任务。每次执行创建独立 session，不共享上下文。
+  - `agent` — 到点触发一次完整的 agent 对话，结果以**流式卡片**形式发送（和用户主动对话体验一致，能看到思考/工具调用过程）。适合"每天早上帮我汇总 GitHub notifications""每周五生成工作总结"这种需要实时计算或联网的任务。默认每次执行创建独立 session；如 body 带 `reuseConversationId`，则复用对应 conversation/session 并把卡片发回原话题。
   - `workflow` — 一个调度任务内顺序执行多个 step，目前只支持线性 `shell` / `agent` steps。适合"先拉数据，再让 agent 总结"这类任务；比如 RSS 先跑抓取脚本，再让 agent 基于产物输出摘要。
 - `message`（非 workflow 时必填）：kind=message 时为文本内容；kind=agent 时作为喂给 agent 的 prompt（也可用 `prompt` 字段，两者等价）；kind=workflow 时可作为任务摘要，不填则后端会根据 steps 自动生成。
 - `workflow`：仅 kind=workflow 时使用。`steps` 目前只支持：
   - `shell` step：`command` 必填，可选 `cwd` / `timeoutSec`
   - `agent` step：`prompt` 必填，可选 `title`
+- `reuseConversationId`（agent/workflow 可选）：复用某个 Sage 内部 conversation。当前 Codex shell 环境有 `SAGE_CONVERSATION_ID` 时，用户说"稍后继续这个话题/提醒我继续处理"这类语义，应传 `reuseConversationId: "$SAGE_CONVERSATION_ID"`；到点后 Sage 会恢复该 conversation 的 agent session，并把流式卡片回复到原飞书 thread。普通日记、日报、RSS 摘要这类独立周期任务不要传。
 - **注意**：当前没有独立的顶层 `shell` kind。只跑 shell 的定时任务，也要用单 step `workflow` 表达。
 - `pattern`（周期）：标准 5 位 cron，时区 Asia/Shanghai
 - `triggerAt`（一次性）：Unix 毫秒时间戳，必须是未来时间
+
+### 复用上下文决策
+
+只在任务是"当前对话的延迟后续动作"时使用 `reuseConversationId`。典型触发词：继续、回到这个话题、刚才那个、这件事、这个 PR、这段代码、我们上面说的、稍后再处理。复用后会同时复用 Sage conversation、agent session、Codex thread，并把结果回复回原飞书 thread。
+
+复用上下文时，任务描述可以保持简短，不要把当前对话的大段背景重新塞进 prompt；agent 到点后能从原 session/history 中拿到上下文。prompt 只需要写清楚"到点要继续做什么"，例如："继续这个话题，提醒我回到刚才的问题，并基于上下文继续处理。"
+
+默认不要复用上下文的场景：独立提醒、日记/周报/RSS 摘要、天气/健康/服务巡检、GitHub notifications 汇总、长期周期任务。周期任务默认新开，除非用户明确要求"每次都在这个话题里跟踪/继续"。
 
 ## 工作流
 
@@ -93,6 +103,14 @@ TRIGGER_AT=$(($(date +%s) * 1000 + 60 * 60 * 1000))
 curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
   -H "Content-Type: application/json" \
   -d "{\"kind\":\"agent\",\"prompt\":\"帮我查一下北京天气并总结发给我\",\"triggerAt\":${TRIGGER_AT}}"
+```
+
+```bash
+# 示例：30分钟后回到当前话题继续处理（复用当前 conversation/session）
+TRIGGER_AT=$(($(date +%s) * 1000 + 30 * 60 * 1000))
+curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
+  -H "Content-Type: application/json" \
+  -d "{\"kind\":\"agent\",\"prompt\":\"继续这个话题：提醒用户回到刚才的问题，并基于当前上下文继续处理。\",\"reuseConversationId\":\"$(printenv SAGE_CONVERSATION_ID)\",\"triggerAt\":${TRIGGER_AT}}"
 ```
 
 ```bash

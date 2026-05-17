@@ -10,13 +10,17 @@ import { getOperationsService } from '../apps/operations/service';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+export interface AgentTaskRunOptions {
+  reuseConversationId?: string;
+}
+
 export interface TaskContext {
   agent: AgentProvider;
   logger: Logger;
   /** 主动向 owner 发纯文本消息（由 SageCore 注入），返回 message_id */
   sendMessageToOwner?: (text: string) => Promise<string | void>;
   /** 主动触发一次 agent 任务并以流式卡片发送给 owner（由 SageCore 注入） */
-  runAgentTask?: (prompt: string, title?: string) => Promise<void>;
+  runAgentTask?: (prompt: string, title?: string, options?: AgentTaskRunOptions) => Promise<void>;
 }
 
 /** Handler function for built-in tasks */
@@ -63,11 +67,17 @@ export interface WorkflowTaskPayload {
   steps: WorkflowStep[];
 }
 
+export interface DynamicTaskContext {
+  reuseConversationId?: string;
+}
+
 export interface DynamicTaskWriteOptions {
   kind?: DynamicTaskKind;
   message: string;
   title?: string;
   payload?: WorkflowTaskPayload;
+  context?: DynamicTaskContext;
+  reuseConversationId?: string;
   pattern?: string;
   triggerAt?: number;
 }
@@ -83,6 +93,8 @@ export interface DynamicTask {
   title: string | null;
   /** workflow 结构化定义 */
   payload: WorkflowTaskPayload | null;
+  /** Optional runtime context for agent/workflow execution */
+  context: DynamicTaskContext | null;
   /** Cron pattern (recurring) OR null for one-shot */
   pattern: string | null;
   /** Epoch ms for one-shot trigger time */
@@ -92,8 +104,9 @@ export interface DynamicTask {
   created_at: number;
 }
 
-interface RawDynamicTask extends Omit<DynamicTask, 'payload'> {
+interface RawDynamicTask extends Omit<DynamicTask, 'payload' | 'context'> {
   payload: string | null;
+  context_json: string | null;
 }
 
 /** Job data flowing through bunqueue */
@@ -109,6 +122,8 @@ interface TaskJobData {
   title?: string;
   /** For workflow: serialized payload */
   payload?: string;
+  /** Serialized DynamicTaskContext */
+  context?: string;
 }
 
 interface WorkflowStepRunRecord {
@@ -241,6 +256,14 @@ function normalizeWorkflowPayload(input: unknown): WorkflowTaskPayload {
   };
 }
 
+function normalizeDynamicTaskContext(opts: DynamicTaskWriteOptions): DynamicTaskContext | null {
+  const rawReuseConversationId = opts.reuseConversationId ?? opts.context?.reuseConversationId;
+  const reuseConversationId = typeof rawReuseConversationId === 'string'
+    ? rawReuseConversationId.trim()
+    : '';
+  return reuseConversationId ? { reuseConversationId } : null;
+}
+
 // ─── TaskScheduler ───────────────────────────────────────────────────────────
 
 export class TaskScheduler {
@@ -273,6 +296,7 @@ export class TaskScheduler {
         message TEXT NOT NULL,
         title TEXT,
         payload TEXT,
+        context_json TEXT,
         pattern TEXT,
         trigger_at INTEGER,
         status TEXT NOT NULL DEFAULT 'active',
@@ -295,6 +319,11 @@ export class TaskScheduler {
     if (!hasPayload) {
       this.db.exec(`ALTER TABLE dynamic_tasks ADD COLUMN payload TEXT`);
       this.logger.info('dynamic_tasks 表迁移：新增 payload 字段');
+    }
+    const hasContextJson = cols.some((c) => c.name === 'context_json');
+    if (!hasContextJson) {
+      this.db.exec(`ALTER TABLE dynamic_tasks ADD COLUMN context_json TEXT`);
+      this.logger.info('dynamic_tasks 表迁移：新增 context_json 字段');
     }
   }
 
@@ -418,18 +447,20 @@ export class TaskScheduler {
 
     const nextTask = this.normalizeDynamicTask(id, opts, existing.created_at);
     const restorePayload = existing.payload ? JSON.stringify(existing.payload) : null;
+    const restoreContext = existing.context ? JSON.stringify(existing.context) : null;
 
     await this.unregisterDynamicTask(existing);
 
     this.db.run(
       `UPDATE dynamic_tasks
-       SET kind = ?, message = ?, title = ?, payload = ?, pattern = ?, trigger_at = ?
+       SET kind = ?, message = ?, title = ?, payload = ?, context_json = ?, pattern = ?, trigger_at = ?
        WHERE id = ?`,
       [
         nextTask.kind,
         nextTask.message,
         nextTask.title,
         nextTask.payload ? JSON.stringify(nextTask.payload) : null,
+        nextTask.context ? JSON.stringify(nextTask.context) : null,
         nextTask.pattern,
         nextTask.trigger_at,
         id,
@@ -443,13 +474,14 @@ export class TaskScheduler {
     } catch (error) {
       this.db.run(
         `UPDATE dynamic_tasks
-         SET kind = ?, message = ?, title = ?, payload = ?, pattern = ?, trigger_at = ?
+         SET kind = ?, message = ?, title = ?, payload = ?, context_json = ?, pattern = ?, trigger_at = ?
          WHERE id = ?`,
         [
           existing.kind,
           existing.message,
           existing.title,
           restorePayload,
+          restoreContext,
           existing.pattern,
           existing.trigger_at,
           id,
@@ -485,6 +517,7 @@ export class TaskScheduler {
       message: task.message,
       title: task.title || undefined,
       payload: task.payload ? JSON.stringify(task.payload) : undefined,
+      context: task.context ? JSON.stringify(task.context) : undefined,
     };
   }
 
@@ -495,6 +528,7 @@ export class TaskScheduler {
 
     const kind: DynamicTaskKind = opts.kind || 'message';
     const payload = kind === 'workflow' ? normalizeWorkflowPayload(opts.payload) : null;
+    const context = normalizeDynamicTaskContext(opts);
     const workflowSummary = payload ? summarizeWorkflowPayload(payload) : '';
     const message = kind === 'workflow'
       ? (opts.message.trim() || workflowSummary)
@@ -510,6 +544,7 @@ export class TaskScheduler {
       message,
       title: opts.title || null,
       payload,
+      context,
       pattern: opts.pattern || null,
       trigger_at: opts.triggerAt || null,
       status: 'active',
@@ -519,14 +554,15 @@ export class TaskScheduler {
 
   private insertDynamicTask(task: DynamicTask): void {
     this.db.run(
-      `INSERT INTO dynamic_tasks (id, kind, message, title, payload, pattern, trigger_at, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO dynamic_tasks (id, kind, message, title, payload, context_json, pattern, trigger_at, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         task.id,
         task.kind,
         task.message,
         task.title,
         task.payload ? JSON.stringify(task.payload) : null,
+        task.context ? JSON.stringify(task.context) : null,
         task.pattern,
         task.trigger_at,
         task.status,
@@ -548,10 +584,20 @@ export class TaskScheduler {
         this.logger.warn(`dynamic task payload 解析失败: id=${raw.id}, error=${String(error)}`);
       }
     }
+    let context: DynamicTaskContext | null = null;
+    if (raw.context_json) {
+      try {
+        const parsed = JSON.parse(raw.context_json) as DynamicTaskContext;
+        context = parsed?.reuseConversationId ? { reuseConversationId: String(parsed.reuseConversationId) } : null;
+      } catch (error) {
+        this.logger.warn(`dynamic task context 解析失败: id=${raw.id}, error=${String(error)}`);
+      }
+    }
     return {
       ...raw,
       kind: (raw.kind || 'message') as DynamicTaskKind,
       payload,
+      context,
     };
   }
 
@@ -581,7 +627,7 @@ export class TaskScheduler {
 
   /** Process a job from the queue */
   private async processJob(job: { data: TaskJobData }): Promise<void> {
-    const { type, task_id, kind, message, title, payload } = job.data;
+    const { type, task_id, kind, message, title, payload, context } = job.data;
     const contextKind = type === 'builtin' ? 'builtin' : (kind || 'message');
 
     return runWithRequestContext({
@@ -628,15 +674,16 @@ export class TaskScheduler {
         this.logger.info(`执行动态任务(${effectiveKind}): ${task_id}`);
 
         try {
+          const taskContext = this.parseTaskContext(context);
           if (effectiveKind === 'agent') {
-            await this.runAgentPrompt(message || '(空 prompt)', title);
+            await this.runAgentPrompt(message || '(空 prompt)', title, taskContext);
             this.logger.info(`动态 agent 任务已完成: ${task_id}`);
           } else if (effectiveKind === 'workflow') {
             if (!payload) {
               throw new Error('workflow 任务缺少 payload');
             }
             const workflow = normalizeWorkflowPayload(JSON.parse(payload));
-            await this.runWorkflow(task_id, workflow, title || undefined);
+            await this.runWorkflow(task_id, workflow, title || undefined, taskContext);
             this.logger.info(`动态 workflow 任务已完成: ${task_id}`);
           } else {
             if (!this.ctx.sendMessageToOwner) {
@@ -668,9 +715,22 @@ export class TaskScheduler {
     });
   }
 
-  private async runAgentPrompt(prompt: string, title?: string): Promise<void> {
+  private parseTaskContext(serialized?: string): DynamicTaskContext | undefined {
+    if (!serialized) return undefined;
+    try {
+      const parsed = JSON.parse(serialized) as DynamicTaskContext;
+      return parsed?.reuseConversationId
+        ? { reuseConversationId: String(parsed.reuseConversationId) }
+        : undefined;
+    } catch (error) {
+      this.logger.warn(`任务 context 解析失败: ${String(error)}`);
+      return undefined;
+    }
+  }
+
+  private async runAgentPrompt(prompt: string, title?: string, context?: DynamicTaskContext): Promise<void> {
     if (this.ctx.runAgentTask) {
-      await this.ctx.runAgentTask(prompt, title);
+      await this.ctx.runAgentTask(prompt, title, context);
       return;
     }
 
@@ -718,7 +778,12 @@ export class TaskScheduler {
     try { await this.queue.removeAsync(`dynamic:${task.id}`); } catch { /* may have fired */ }
   }
 
-  private async runWorkflow(taskId: string, workflow: WorkflowTaskPayload, workflowTitle?: string): Promise<void> {
+  private async runWorkflow(
+    taskId: string,
+    workflow: WorkflowTaskPayload,
+    workflowTitle?: string,
+    context?: DynamicTaskContext,
+  ): Promise<void> {
     const runDir = this.createWorkflowRunDir(taskId);
     const resultsFile = resolve(runDir, 'results.json');
     const results: WorkflowStepRunRecord[] = [];
@@ -734,7 +799,7 @@ export class TaskScheduler {
         const result = await this.runWorkflowShellStep(step, index, runDir);
         results.push(result);
       } else {
-        const result = await this.runWorkflowAgentStep(taskId, step, index, runDir, results, workflowTitle);
+        const result = await this.runWorkflowAgentStep(taskId, step, index, runDir, results, workflowTitle, context);
         results.push(result);
       }
 
@@ -861,6 +926,7 @@ export class TaskScheduler {
     runDir: string,
     previousResults: WorkflowStepRunRecord[],
     workflowTitle?: string,
+    context?: DynamicTaskContext,
   ): Promise<WorkflowStepRunRecord> {
     const outputDir = resolve(runDir, `${String(index + 1).padStart(2, '0')}-${sanitizePathSegment(step.id || step.kind)}`);
     mkdirSync(outputDir, { recursive: true });
@@ -870,7 +936,7 @@ export class TaskScheduler {
     const promptPath = resolve(outputDir, 'prompt.md');
     await Bun.write(promptPath, finalPrompt);
 
-    await this.runAgentPrompt(finalPrompt, step.title || workflowTitle || undefined);
+    await this.runAgentPrompt(finalPrompt, step.title || workflowTitle || undefined, context);
 
     const finishedAt = new Date();
     return {
