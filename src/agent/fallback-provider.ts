@@ -3,6 +3,10 @@
 import { AgentProvider, AgentSession, AgentResponse, AgentEvent } from './types';
 import { Logger } from '../utils';
 
+function isAbortError(error: any): boolean {
+  return error?.name === 'AbortError' || error?.code === 'ABORT_ERR';
+}
+
 /** 查询 conversationId 对应的最近对话历史（由外部注入，避免直接依赖 HistoryStore） */
 export type RecentHistoryFn = (conversationId: string, maxTurns: number) => Array<{ role: string; content: string }>;
 
@@ -131,6 +135,11 @@ export class FallbackAgentProvider implements AgentProvider {
     try {
       yield* provider.sendMessageStream(sessionId, message, signal);
     } catch (err: any) {
+      if (signal?.aborted || isAbortError(err)) {
+        this.logger.info(`Provider 调用已取消: provider=${provider.name}, session=${sessionId}`);
+        throw err;
+      }
+
       const errSummary = this.describeError(err);
       if (!this._autoFallbackEnabled || !this.isFallbackEligible(err)) {
         this.logger.warn(

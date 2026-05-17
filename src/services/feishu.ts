@@ -91,6 +91,7 @@ export class FeishuService {
   private eventDispatcher: Lark.EventDispatcher;
   private logger: Logger;
   private messageHandler?: (ctx: MessageContext) => Promise<void>;
+  private messageRecallHandler?: (messageId: string) => Promise<void> | void;
   private threadCreatedHandler?: (messageId: string, threadId: string) => void;
   private processedMessages: Set<string> = new Set();
   private messageThreadMap: Map<string, string> = new Map();
@@ -127,6 +128,10 @@ export class FeishuService {
     this.messageHandler = handler;
   }
 
+  setMessageRecallHandler(handler: (messageId: string) => Promise<void> | void) {
+    this.messageRecallHandler = handler;
+  }
+
   setThreadCreatedHandler(handler: (messageId: string, threadId: string) => void) {
     this.threadCreatedHandler = handler;
   }
@@ -148,12 +153,41 @@ export class FeishuService {
             this.logger.error('异步处理消息失败:', err);
           });
         },
+        'im.message.recalled_v1': async (data: any) => {
+          this.handleMessageRecall(data).catch((err) => {
+            this.logger.error('异步处理消息撤回失败:', err);
+          });
+        },
       })
       .register({
         'connection': async (data: any) => {
           this.logger.info('长连接状态变更:', data);
         },
       });
+  }
+
+  private async handleMessageRecall(data: any): Promise<void> {
+    const eventId = data?.event_id || data?.header?.event_id;
+    if (eventId && this.isDuplicateMessage(eventId)) {
+      this.logger.warn(`检测到重复撤回事件，事件ID: ${eventId}，跳过处理`);
+      return;
+    }
+
+    const messageId =
+      data?.message_id
+      || data?.message?.message_id
+      || data?.event?.message_id
+      || data?.event?.message?.message_id;
+
+    if (!messageId) {
+      this.logger.warn('收到消息撤回事件但无 message_id:', data);
+      return;
+    }
+
+    this.logger.info(`消息已撤回: messageId=${messageId}`);
+    if (this.messageRecallHandler) {
+      await this.messageRecallHandler(messageId);
+    }
   }
 
   private async handleMessage(data: FeishuMessage): Promise<void> {

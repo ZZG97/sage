@@ -13,6 +13,14 @@ const DRAIN_TIMEOUT = 30_000; // drain 最多等 30s
 const MAX_SESSION_AGE = 24 * 60 * 60 * 1000; // 会话最大存活时间 24h
 const DEFAULT_PROACTIVE_TOPIC = 'Sage 主动任务';
 
+interface ActiveRun {
+  conversationId: string;
+  sourceMessageIds: Set<string>;
+  abortController: AbortController;
+  replyMessageIds: Set<string>;
+  cancelReason?: string;
+}
+
 export class SageCore {
   private feishuService: FeishuService;
   private agent: AgentProvider;
@@ -23,6 +31,9 @@ export class SageCore {
 
   // 活跃卡片追踪：replyMessageId -> { conversationId, startTime, abortController }
   private activeCards: Map<string, { conversationId: string; startTime: number; abortController: AbortController }> = new Map();
+
+  // 当前正在执行的 agent run。用于把撤回的用户消息映射到正在跑的任务。
+  private activeRuns: Map<string, ActiveRun> = new Map();
 
   // 已在 provider 中恢复过的 session（避免重复 restoreSession）
   private restoredSessions: Set<string> = new Set();
@@ -43,6 +54,7 @@ export class SageCore {
 
     // 设置飞书消息处理器（不再返回 string，SageCore 自行控制卡片）
     this.feishuService.setMessageHandler(this.handleFeishuMessage.bind(this));
+    this.feishuService.setMessageRecallHandler(this.handleMessageRecall.bind(this));
 
     // 为 FallbackAgentProvider 注入历史查询能力
     if (agent instanceof FallbackAgentProvider) {
@@ -146,7 +158,11 @@ export class SageCore {
 
         // 构造合并后的 ctx 用于处理
         const mergedCtx: MessageContext = { ...lastCtx, text: hint + mergedText };
-        await this.processThreadMessage(mergedCtx, conversationId);
+        await this.processThreadMessage(
+          mergedCtx,
+          conversationId,
+          queuedMessages.map(m => m.messageId),
+        );
       }
     } finally {
       this.processingConversations.delete(conversationId);
@@ -154,7 +170,11 @@ export class SageCore {
   }
 
   // 实际处理单条（或合并后的）消息
-  private async processThreadMessage(ctx: MessageContext, conversationId: string): Promise<void> {
+  private async processThreadMessage(
+    ctx: MessageContext,
+    conversationId: string,
+    sourceMessageIds: string[] = [ctx.messageId],
+  ): Promise<void> {
     try {
       this.rememberMessageConversation(ctx.messageId, conversationId);
       this.logger.info(
@@ -200,6 +220,7 @@ export class SageCore {
         prompt: processedMessage,
         conversationId,
         sessionId,
+        sourceMessageIds,
         anchor: { kind: 'reply', parentMessageId: ctx.messageId },
       });
 
@@ -229,11 +250,12 @@ export class SageCore {
     prompt: string;
     conversationId: string;
     sessionId: string;
+    sourceMessageIds?: string[];
     anchor:
       | { kind: 'reply'; parentMessageId: string }
       | { kind: 'proactive'; openId: string; title?: string };
   }): Promise<{ replyMessageId: string } | null> {
-    const { prompt, conversationId, sessionId, anchor } = opts;
+    const { prompt, conversationId, sessionId, sourceMessageIds, anchor } = opts;
 
     // Step 1: 发送初始 "thinking" 卡片
     const initialCard = this.feishuService.buildStreamingCard([], true);
@@ -268,6 +290,13 @@ export class SageCore {
 
     // 追踪活跃卡片（含 abort 控制器）
     const abortController = new AbortController();
+    const activeRun: ActiveRun = {
+      conversationId,
+      sourceMessageIds: new Set(sourceMessageIds ?? (anchor.kind === 'reply' ? [anchor.parentMessageId] : [])),
+      abortController,
+      replyMessageIds: new Set([replyMessageId]),
+    };
+    this.activeRuns.set(conversationId, activeRun);
     this.rememberMessageConversation(replyMessageId, conversationId);
     this.activeCards.set(replyMessageId, { conversationId, startTime: Date.now(), abortController });
 
@@ -292,7 +321,7 @@ export class SageCore {
         if (iterResult.done) {
           if (abortController.signal.aborted) {
             this.logger.info(`任务被用户中断: ${conversationId}`);
-            resultText = '⏹ 任务已被用户中断。';
+            resultText = activeRun.cancelReason || '⏹ 任务已被用户中断。';
             stream.return?.(undefined as any).catch(() => {});
           }
           break;
@@ -339,6 +368,7 @@ export class SageCore {
               const { messageId: newMsgId } = await this.feishuService.replyCard(currentReplyMessageId, newCard);
               if (newMsgId) {
                 currentReplyMessageId = newMsgId;
+                activeRun.replyMessageIds.add(currentReplyMessageId);
                 this.rememberMessageConversation(currentReplyMessageId, conversationId);
                 this.activeCards.set(currentReplyMessageId, { conversationId, startTime: Date.now(), abortController });
               }
@@ -352,6 +382,7 @@ export class SageCore {
                 const { messageId: newMsgId } = await this.feishuService.replyCard(currentReplyMessageId, newCard);
                 if (newMsgId) {
                   currentReplyMessageId = newMsgId;
+                  activeRun.replyMessageIds.add(currentReplyMessageId);
                   this.rememberMessageConversation(currentReplyMessageId, conversationId);
                   this.activeCards.set(currentReplyMessageId, { conversationId, startTime: Date.now(), abortController });
                 }
@@ -444,7 +475,12 @@ export class SageCore {
       } catch (err) {
         this.logger.warn('持久化 resume_id 失败:', err);
       }
-      this.activeCards.delete(currentReplyMessageId);
+      for (const msgId of activeRun.replyMessageIds) {
+        this.activeCards.delete(msgId);
+      }
+      if (this.activeRuns.get(conversationId) === activeRun) {
+        this.activeRuns.delete(conversationId);
+      }
     }
 
     return { replyMessageId: currentReplyMessageId };
@@ -510,17 +546,9 @@ export class SageCore {
     const conversationId = this.findConversation(ctx);
     if (!conversationId) return '当前话题没有正在执行的任务。';
 
-    // 在 activeCards 中找到该 conversation 的活跃任务
-    let aborted = false;
-    for (const [msgId, card] of this.activeCards) {
-      if (card.conversationId === conversationId) {
-        card.abortController.abort();
-        aborted = true;
-        this.logger.info(`用户中断任务: conversation=${conversationId}, cardMsgId=${msgId}`);
-      }
-    }
-
-    if (aborted) {
+    const activeRun = this.activeRuns.get(conversationId);
+    if (activeRun) {
+      this.cancelActiveRun(activeRun, '⏹ 任务已被用户中断。', 'user_stop_command');
       return '⏹ 已中断当前任务';
     }
     return '当前话题没有正在执行的任务。';
@@ -686,6 +714,66 @@ export class SageCore {
 
   private rememberThreadConversation(threadId: string | undefined, conversationId: string): void {
     if (threadId) this.threadConversations.set(threadId, conversationId);
+  }
+
+  private async handleMessageRecall(messageId: string): Promise<void> {
+    const removedPending = this.removePendingMessage(messageId);
+    const activeRun = this.findActiveRunBySourceMessage(messageId);
+
+    if (activeRun) {
+      this.cancelActiveRun(
+        activeRun,
+        '⏹ 已因用户撤回原消息而取消。',
+        `message_recalled:${messageId}`,
+      );
+    }
+
+    this.messageConversations.delete(messageId);
+
+    if (!removedPending && !activeRun) {
+      this.logger.info(`撤回消息未命中待处理或运行中任务: messageId=${messageId}`);
+    }
+  }
+
+  private removePendingMessage(messageId: string): boolean {
+    let removed = false;
+
+    for (const [conversationId, queue] of this.pendingMessages) {
+      const nextQueue = queue.filter(ctx => ctx.messageId !== messageId);
+      if (nextQueue.length === queue.length) continue;
+
+      removed = true;
+      if (nextQueue.length === 0) {
+        this.pendingMessages.delete(conversationId);
+      } else {
+        this.pendingMessages.set(conversationId, nextQueue);
+      }
+
+      this.logger.info(
+        `撤回排队消息: conv=${conversationId}, msg=${messageId}, removed=${queue.length - nextQueue.length}, remaining=${nextQueue.length}`,
+      );
+    }
+
+    return removed;
+  }
+
+  private findActiveRunBySourceMessage(messageId: string): ActiveRun | undefined {
+    for (const activeRun of this.activeRuns.values()) {
+      if (activeRun.sourceMessageIds.has(messageId)) {
+        return activeRun;
+      }
+    }
+    return undefined;
+  }
+
+  private cancelActiveRun(activeRun: ActiveRun, reason: string, source: string): void {
+    activeRun.cancelReason = reason;
+    if (!activeRun.abortController.signal.aborted) {
+      activeRun.abortController.abort();
+      this.logger.info(
+        `取消运行中任务: conv=${activeRun.conversationId}, source=${source}, sourceMessages=${Array.from(activeRun.sourceMessageIds).join(',')}`,
+      );
+    }
   }
 
   private normalizeProactiveTopic(title?: string): string {

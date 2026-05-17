@@ -6,6 +6,18 @@ function createFeishuService(): FeishuService {
   return Object.create(FeishuService.prototype) as FeishuService;
 }
 
+function createFeishuServiceWithInternals(): FeishuService {
+  const service = createFeishuService() as any;
+  service.processedMessages = new Set<string>();
+  service.logger = {
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    debug: () => {},
+  };
+  return service as FeishuService;
+}
+
 function parseCard(cardJson: string): any {
   return JSON.parse(cardJson);
 }
@@ -96,5 +108,41 @@ describe('FeishuService.buildStreamingCard', () => {
     expect(panel.header.title.content).toBe('Working on it (3 steps)');
     expect(markdown.content).toBe('正在跑测试');
     expect(indicator.icon.token).toBe('more_outlined');
+  });
+});
+
+describe('FeishuService message recall', () => {
+  it('dispatches recalled message ids from Feishu event payloads', async () => {
+    const service = createFeishuServiceWithInternals() as any;
+    const recalled: string[] = [];
+    service.setMessageRecallHandler((messageId: string) => {
+      recalled.push(messageId);
+    });
+
+    await service.handleMessageRecall({
+      header: { event_id: 'evt-recall-1' },
+      event: { message_id: 'om_recalled' },
+    });
+
+    expect(recalled).toEqual(['om_recalled']);
+  });
+
+  it('deduplicates recalled message events', async () => {
+    const service = createFeishuServiceWithInternals() as any;
+    let calls = 0;
+    service.setMessageRecallHandler(() => {
+      calls += 1;
+    });
+
+    await service.handleMessageRecall({
+      event_id: 'evt-recall-duplicate',
+      message_id: 'om_recalled',
+    });
+    await service.handleMessageRecall({
+      event_id: 'evt-recall-duplicate',
+      message_id: 'om_recalled',
+    });
+
+    expect(calls).toBe(1);
   });
 });

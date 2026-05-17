@@ -6,6 +6,10 @@ import type { ThreadEvent, ThreadItem } from '@openai/codex-sdk';
 import { AgentProvider, AgentSession, AgentResponse, AgentEvent, CodexProviderConfig, StructuredAgentInput, StructuredAgentResponse } from './types';
 import { Logger, sanitizeLogValue } from '../utils';
 
+function isAbortError(error: any): boolean {
+  return error?.name === 'AbortError' || error?.code === 'ABORT_ERR';
+}
+
 export class CodexProvider implements AgentProvider {
   readonly name = 'codex';
 
@@ -163,6 +167,10 @@ export class CodexProvider implements AgentProvider {
 
     } catch (error: any) {
       this.threads.delete(sessionId);
+      if (isAbortError(error) || signal?.aborted) {
+        this.logger.info(`Codex 调用已取消: session=${sessionId}, messageLen=${message.length}`);
+        throw error;
+      }
       this.logger.error('Codex 调用失败', error);
       throw error;
     }

@@ -6,6 +6,10 @@ import type { SDKResultError, SDKResultMessage } from '@anthropic-ai/claude-agen
 import { AgentProvider, AgentSession, AgentResponse, AgentEvent, AgentResultEvent, CcMinimaxProviderConfig, MinimaxMcpConfig } from './types';
 import { Logger } from '../utils';
 
+function isAbortError(error: any): boolean {
+  return error?.name === 'AbortError' || error?.code === 'ABORT_ERR';
+}
+
 export class CcMinimaxProvider implements AgentProvider {
   readonly name = 'cc-minimax';
 
@@ -286,6 +290,12 @@ export class CcMinimaxProvider implements AgentProvider {
       yield { type: 'result', content: resultText || '（无回复内容）', ts: new Date().toISOString(), persist: false };
 
     } catch (error: any) {
+      if (isAbortError(error) || signal?.aborted) {
+        this.logger.info(
+          `CC-MiniMax 调用已取消: session=${sessionId}, resume=${sdkSessionId || '无'}, messageLen=${message.length}`,
+        );
+        throw error;
+      }
       this.logger.error(
         `CC-MiniMax 调用失败: session=${sessionId}, resume=${sdkSessionId || '无'}, messageLen=${message.length}`,
         error
