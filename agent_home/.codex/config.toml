@@ -3,3 +3,9 @@
 [mcp_servers.playwright]
 command = "npx"
 args = ["-y", "@playwright/mcp@latest", "--cdp-endpoint", "http://localhost:9222"]
+startup_timeout_sec = 60
+
+[mcp_servers.amap_maps]
+command = "node"
+args = ["/Users/zhangzhiguo/workspace/sage/agent_home/scripts/amap-mcp-stdio.mjs"]
+default_tools_approval_mode = "approve"
