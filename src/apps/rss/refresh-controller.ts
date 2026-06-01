@@ -15,12 +15,17 @@ export class RssRefreshController {
   ) {}
 
   async refreshEligibleFeeds(limit: number, dryRun = false): Promise<RefreshResult[]> {
-    const feeds = this.repository.listInputFeeds();
+    const candidates = this.repository.listInputRefreshCandidates();
     const results: RefreshResult[] = [];
     const lastDomainAttempt = new Map<string, number>();
 
-    for (const feed of feeds) {
+    for (const candidate of candidates) {
       if (results.length >= limit) break;
+      const { feed, policy } = candidate;
+      if (!policy.due) {
+        continue;
+      }
+
       const state = this.repository.getRefreshState(feed.id, feed.domain);
       const domainState = this.repository.getDomainRefreshState(feed.domain);
       const domainDecision = decideDomainBackoff(domainState);
@@ -53,7 +58,7 @@ export class RssRefreshController {
       }
       results.push(result);
 
-      logger.info(`刷新 ${feed.name}: ${result.ok ? 'OK' : 'FAIL'} new=${result.newArticles}`);
+      logger.info(`刷新 ${feed.name}: ${result.ok ? 'OK' : 'FAIL'} new=${result.newArticles} tier=${policy.tier} score=${policy.score}`);
     }
 
     return results;

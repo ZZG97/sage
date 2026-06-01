@@ -44,6 +44,34 @@ export interface RefreshDecision {
   waitSeconds: number;
 }
 
+export type RefreshTier = 'new' | 'hot' | 'normal' | 'cold' | 'dormant';
+
+export interface FeedRefreshStats {
+  lastAttemptAt: number | null;
+  lastSuccessAt: number | null;
+  recentAttempts: number;
+  recentNewArticles: number;
+  recentMustRead: number;
+  recentSkim: number;
+  recentSkip: number;
+  zeroNewStreak: number;
+}
+
+export interface AdaptiveRefreshDecision {
+  due: boolean;
+  tier: RefreshTier;
+  intervalSeconds: number;
+  overdueRatio: number;
+  score: number;
+  reason: string;
+}
+
+export interface FeedRefreshCandidate {
+  feed: FreshRssFeed;
+  stats: FeedRefreshStats;
+  policy: AdaptiveRefreshDecision;
+}
+
 export interface RefreshResult {
   feedId: number;
   feedName: string;

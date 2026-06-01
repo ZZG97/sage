@@ -1,8 +1,8 @@
 import { Database } from 'bun:sqlite';
 import { resolve } from 'path';
 import { getDatabase } from '../../shared/db';
-import { detectFeedDomain, nextBackoffUntil, type RefreshState } from './refresh-policy';
-import type { FeedDomain, FreshRssEntry, FreshRssFeed, LabelResult, RefreshResult, RssPriority } from './types';
+import { decideAdaptiveRefresh, detectFeedDomain, EMPTY_FEED_REFRESH_STATS, nextBackoffUntil, type RefreshState } from './refresh-policy';
+import type { FeedDomain, FeedRefreshCandidate, FeedRefreshStats, FreshRssEntry, FreshRssFeed, LabelResult, RefreshResult, RssPriority } from './types';
 
 const GENERATED_FEED_URL_MARKER = '/apps/rss/feeds/';
 
@@ -86,6 +86,27 @@ export class FreshRssRepository {
 
   listInputFeeds(limit = 1000): FreshRssFeed[] {
     return this.listFeeds(limit).filter((feed) => !isSageGeneratedFeedUrl(feed.url));
+  }
+
+  listInputRefreshCandidates(limit = 1000): FeedRefreshCandidate[] {
+    const feeds = this.listInputFeeds(limit);
+    const statsByFeedId = this.loadFeedRefreshStats(feeds.map((feed) => feed.id));
+    const now = Math.floor(Date.now() / 1000);
+
+    return feeds
+      .map((feed) => {
+        const stats = statsByFeedId.get(feed.id) ?? emptyFeedRefreshStats();
+        return {
+          feed,
+          stats,
+          policy: decideAdaptiveRefresh(feed, stats, now),
+        };
+      })
+      .sort((a, b) => {
+        if (a.policy.due !== b.policy.due) return a.policy.due ? -1 : 1;
+        if (a.policy.score !== b.policy.score) return b.policy.score - a.policy.score;
+        return (a.stats.lastAttemptAt ?? 0) - (b.stats.lastAttemptAt ?? 0);
+      });
   }
 
   listGeneratedFeeds(limit = 1000): FreshRssFeed[] {
@@ -344,6 +365,88 @@ export class FreshRssRepository {
     );
   }
 
+  private loadFeedRefreshStats(feedIds: number[]): Map<number, FeedRefreshStats> {
+    const statsByFeedId = new Map<number, FeedRefreshStats>();
+    for (const feedId of feedIds) {
+      statsByFeedId.set(feedId, emptyFeedRefreshStats());
+    }
+    if (feedIds.length === 0) return statsByFeedId;
+
+    const placeholders = feedIds.map(() => '?').join(',');
+
+    const stateRows = this.sidecarDb.prepare(`
+      SELECT feed_id, MAX(last_attempt_at) AS last_attempt_at, MAX(last_success_at) AS last_success_at
+      FROM feed_refresh_state
+      WHERE feed_id IN (${placeholders})
+      GROUP BY feed_id
+    `).all(...feedIds) as Array<{ feed_id: number; last_attempt_at: number | null; last_success_at: number | null }>;
+    for (const row of stateRows) {
+      const stats = statsByFeedId.get(row.feed_id);
+      if (!stats) continue;
+      stats.lastAttemptAt = row.last_attempt_at;
+      stats.lastSuccessAt = row.last_success_at;
+    }
+
+    const runRows = this.sidecarDb.prepare(`
+      SELECT
+        feed_id,
+        COUNT(*) AS recent_attempts,
+        COALESCE(SUM(CASE WHEN ok = 1 THEN new_articles ELSE 0 END), 0) AS recent_new_articles
+      FROM refresh_runs
+      WHERE feed_id IN (${placeholders})
+        AND created_at >= datetime('now', 'localtime', '-14 days')
+      GROUP BY feed_id
+    `).all(...feedIds) as Array<{ feed_id: number; recent_attempts: number; recent_new_articles: number }>;
+    for (const row of runRows) {
+      const stats = statsByFeedId.get(row.feed_id);
+      if (!stats) continue;
+      stats.recentAttempts = Number(row.recent_attempts);
+      stats.recentNewArticles = Number(row.recent_new_articles);
+    }
+
+    const recentRuns = this.sidecarDb.prepare(`
+      SELECT feed_id, ok, new_articles
+      FROM refresh_runs
+      WHERE feed_id IN (${placeholders})
+      ORDER BY feed_id ASC, id DESC
+    `).all(...feedIds) as Array<{ feed_id: number; ok: number; new_articles: number }>;
+    const seenRunCountByFeedId = new Map<number, number>();
+    for (const row of recentRuns) {
+      const seen = seenRunCountByFeedId.get(row.feed_id) ?? 0;
+      if (seen >= 12) continue;
+      seenRunCountByFeedId.set(row.feed_id, seen + 1);
+      const stats = statsByFeedId.get(row.feed_id);
+      if (!stats) continue;
+      if (row.ok === 1 && row.new_articles === 0) {
+        stats.zeroNewStreak += 1;
+      } else if (row.new_articles > 0) {
+        seenRunCountByFeedId.set(row.feed_id, 12);
+      }
+    }
+
+    const aiRows = this.sidecarDb.prepare(`
+      SELECT
+        feed_id,
+        COALESCE(SUM(CASE WHEN priority = 'must_read' THEN 1 ELSE 0 END), 0) AS must_read_count,
+        COALESCE(SUM(CASE WHEN priority = 'skim' THEN 1 ELSE 0 END), 0) AS skim_count,
+        COALESCE(SUM(CASE WHEN priority = 'skip' THEN 1 ELSE 0 END), 0) AS skip_count
+      FROM processed_entries
+      WHERE feed_id IN (${placeholders})
+        AND dry_run = 0
+        AND processed_at >= datetime('now', 'localtime', '-14 days')
+      GROUP BY feed_id
+    `).all(...feedIds) as Array<{ feed_id: number; must_read_count: number; skim_count: number; skip_count: number }>;
+    for (const row of aiRows) {
+      const stats = statsByFeedId.get(row.feed_id);
+      if (!stats) continue;
+      stats.recentMustRead = Number(row.must_read_count);
+      stats.recentSkim = Number(row.skim_count);
+      stats.recentSkip = Number(row.skip_count);
+    }
+
+    return statsByFeedId;
+  }
+
   private initSidecarSchema(): void {
     this.sidecarDb.exec(`
       CREATE TABLE IF NOT EXISTS processed_entries (
@@ -400,4 +503,8 @@ export class FreshRssRepository {
       CREATE INDEX IF NOT EXISTS idx_rss_refresh_runs_created ON refresh_runs(created_at);
     `);
   }
+}
+
+function emptyFeedRefreshStats(): FeedRefreshStats {
+  return { ...EMPTY_FEED_REFRESH_STATS };
 }
