@@ -35,6 +35,7 @@ export const CARD_SIZE_LIMIT = 28 * 1024;
 const MAX_TABLES_PER_CARD = 5;
 const MARKDOWN_TABLE_REGEX = /^\|.+\|[ \t]*\n\|[\s:|-]+\|[ \t]*\n(?:\|.+\|[ \t]*\n?)+/gm;
 const MARKDOWN_IMAGE_REGEX = /!\[([^\]]*)\]\(([^)]+)\)/g;
+const FENCED_CODE_BLOCK_REGEX = /```[\s\S]*?```/g;
 
 /** 按表格数量拆分 markdown，每块最多 maxTables 个表格 */
 export function splitMarkdownByTables(markdown: string, maxTables: number = MAX_TABLES_PER_CARD): string[] {
@@ -266,7 +267,7 @@ export class FeishuService {
 
         case 'image': {
           const fileKey = content.image_key as string;
-          const localPath = await this.downloadMessageResource(message.message_id, fileKey);
+          const localPath = await this.downloadMessageResource(message.message_id, fileKey, undefined, 'image');
           return {
             text: `![user_uploaded_image](${localPath})`,
             attachments: [{ type: 'image', path: localPath }],
@@ -284,7 +285,7 @@ export class FeishuService {
         }
 
         case 'post': {
-          const result = this.convertPostToMarkdown(content);
+          const result = await this.convertPostToMarkdown(message.message_id, content);
           return { text: result.text, attachments: result.attachments };
         }
 
@@ -299,14 +300,19 @@ export class FeishuService {
   }
 
   /** 下载飞书消息中的图片/文件资源 */
-  async downloadMessageResource(messageId: string, fileKey: string, fileName?: string): Promise<string> {
+  async downloadMessageResource(
+    messageId: string,
+    fileKey: string,
+    fileName?: string,
+    resourceType: 'file' | 'image' = 'file',
+  ): Promise<string> {
     const response = await this.client.im.v1.messageResource.get({
       path: {
         message_id: messageId,
         file_key: fileKey,
       },
       params: {
-        type: 'file',
+        type: resourceType,
       },
     });
 
@@ -323,7 +329,7 @@ export class FeishuService {
       } catch { /* ignore */ }
     }
 
-    const isImage = mime.startsWith('image/');
+    const isImage = resourceType === 'image' || mime.startsWith('image/');
     const dir = isImage ? IMAGES_DIR : FILES_DIR;
 
     // 确定文件名
@@ -333,7 +339,9 @@ export class FeishuService {
     } else {
       finalName = originalName === 'image' ? fileKey : originalName;
       // 添加扩展名
-      const ext = mime.split('/')[1];
+      const ext = mime.startsWith('image/')
+        ? mime.split('/')[1]
+        : (resourceType === 'image' ? 'png' : mime.split('/')[1]);
       if (ext && !finalName.includes('.')) {
         finalName += `.${ext}`;
       }
@@ -367,7 +375,10 @@ export class FeishuService {
   }
 
   /** 将飞书富文本 post 转换为 markdown */
-  private convertPostToMarkdown(postContent: any): { text: string; attachments?: MessageAttachment[] } {
+  private async convertPostToMarkdown(
+    messageId: string,
+    postContent: any,
+  ): Promise<{ text: string; attachments?: MessageAttachment[] }> {
     const attachments: MessageAttachment[] = [];
     const lines: string[] = [];
 
@@ -407,10 +418,23 @@ export class FeishuService {
           case 'at':
             line += `@${elem.user_name || elem.user_id || 'user'}`;
             break;
-          case 'img':
-            // post 中的图片，暂不下载（需要额外 API），标注为图片标记
-            line += `[图片]`;
+          case 'img': {
+            const imageKey = elem.image_key || elem.file_key;
+            if (!imageKey) {
+              line += `[图片]`;
+              break;
+            }
+
+            try {
+              const localPath = await this.downloadMessageResource(messageId, imageKey, undefined, 'image');
+              line += `![user_uploaded_image](${localPath})`;
+              attachments.push({ type: 'image', path: localPath });
+            } catch (error) {
+              this.logger.warn(`富文本图片下载失败: message=${messageId}, image=${imageKey}`, error);
+              line += `[图片: 下载失败]`;
+            }
             break;
+          }
           case 'code_block':
             line += `\n\`\`\`${elem.language || ''}\n${elem.text || ''}\n\`\`\`\n`;
             break;
@@ -716,21 +740,47 @@ export class FeishuService {
 
   /** 处理最终回复中的本地图片：上传替换为 image_key */
   async processImagesInMarkdown(text: string): Promise<string> {
-    let result = text;
-    const matches = [...text.matchAll(MARKDOWN_IMAGE_REGEX)];
+    const processSegment = async (segment: string): Promise<string> => {
+      let result = '';
+      let lastIndex = 0;
+      const matches = [...segment.matchAll(MARKDOWN_IMAGE_REGEX)];
 
-    for (const match of matches) {
-      const [full, alt, src] = match;
-      if (isRemoteImageSource(src)) continue;
+      for (const match of matches) {
+        const [full, alt, src] = match;
+        const index = match.index ?? 0;
+        result += segment.slice(lastIndex, index);
+        lastIndex = index + full.length;
 
-      try {
-        const imageKey = await this.uploadImage(src);
-        result = result.replace(full, `![${alt || 'image'}](${imageKey})`);
-      } catch (err) {
-        this.logger.warn(`处理图片失败，降级为链接: src=${sanitizeLogValue(src, 160)}`, err);
-        result = result.replace(full, `[${alt || '图片'}](${src})`);
+        if (isRemoteImageSource(src)) {
+          result += full;
+          continue;
+        }
+
+        try {
+          const imageKey = await this.uploadImage(src);
+          result += `![${alt || 'image'}](${imageKey})`;
+        } catch (err) {
+          this.logger.warn(`处理图片失败，降级为链接: src=${sanitizeLogValue(src, 160)}`, err);
+          result += `[${alt || '图片'}](${src})`;
+        }
       }
+
+      result += segment.slice(lastIndex);
+      return result;
+    };
+
+    let result = '';
+    let lastIndex = 0;
+    const codeBlocks = [...text.matchAll(FENCED_CODE_BLOCK_REGEX)];
+
+    for (const block of codeBlocks) {
+      const index = block.index ?? 0;
+      result += await processSegment(text.slice(lastIndex, index));
+      result += block[0];
+      lastIndex = index + block[0].length;
     }
+
+    result += await processSegment(text.slice(lastIndex));
     return result;
   }
 

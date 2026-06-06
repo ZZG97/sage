@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'bun:test';
+import fs from 'node:fs';
+import path from 'node:path';
 import { FeishuService, splitMarkdownByTables } from './feishu';
 import type { AgentEvent } from '../agent/types';
 
@@ -108,6 +110,125 @@ describe('FeishuService.buildStreamingCard', () => {
     expect(panel.header.title.content).toBe('Working on it (3 steps)');
     expect(markdown.content).toBe('正在跑测试');
     expect(indicator.icon.token).toBe('more_outlined');
+  });
+});
+
+describe('FeishuService post message parsing', () => {
+  it('downloads images embedded in rich text post messages', async () => {
+    const service = createFeishuServiceWithInternals() as any;
+    const calls: any[] = [];
+    service.downloadMessageResource = async (
+      messageId: string,
+      fileKey: string,
+      fileName?: string,
+      resourceType?: string,
+    ) => {
+      calls.push({ messageId, fileKey, fileName, resourceType });
+      return `workspace/uploads/images/${fileKey}.jpeg`;
+    };
+
+    const parsed = await service.parseMessageContent({
+      message_id: 'om_post',
+      message_type: 'post',
+      chat_id: 'oc_chat',
+      chat_type: 'p2p',
+      content: JSON.stringify({
+        content: [[
+          { tag: 'text', text: '看这个 ' },
+          { tag: 'img', image_key: 'img_v3_post', width: 100, height: 80 },
+        ]],
+      }),
+    });
+
+    expect(parsed.text).toBe('看这个 ![user_uploaded_image](workspace/uploads/images/img_v3_post.jpeg)');
+    expect(parsed.attachments).toEqual([
+      { type: 'image', path: 'workspace/uploads/images/img_v3_post.jpeg' },
+    ]);
+    expect(calls).toEqual([
+      { messageId: 'om_post', fileKey: 'img_v3_post', fileName: undefined, resourceType: 'image' },
+    ]);
+  });
+
+  it('keeps rich text post parsing alive when embedded image download fails', async () => {
+    const service = createFeishuServiceWithInternals() as any;
+    service.downloadMessageResource = async () => {
+      throw new Error('download failed');
+    };
+
+    const parsed = await service.parseMessageContent({
+      message_id: 'om_post',
+      message_type: 'post',
+      chat_id: 'oc_chat',
+      chat_type: 'p2p',
+      content: JSON.stringify({
+        content: [[
+          { tag: 'text', text: '先看图 ' },
+          { tag: 'img', image_key: 'img_v3_post' },
+        ]],
+      }),
+    });
+
+    expect(parsed.text).toBe('先看图 [图片: 下载失败]');
+    expect(parsed.attachments).toBeUndefined();
+  });
+
+  it('stores declared image resources under images when Feishu returns octet-stream metadata', async () => {
+    const service = createFeishuServiceWithInternals() as any;
+    const fileKey = `test_post_image_${Date.now()}`;
+    service.client = {
+      im: {
+        v1: {
+          messageResource: {
+            get: async () => ({
+              headers: {
+                get: (name: string) => name === 'inner_file_data_meta'
+                  ? JSON.stringify({ Mime: 'application/octet-stream', FileName: 'image' })
+                  : undefined,
+              },
+              writeFile: async (targetPath: string) => {
+                fs.writeFileSync(targetPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+              },
+            }),
+          },
+        },
+      },
+    };
+
+    const localPath = await service.downloadMessageResource('om_post', fileKey, undefined, 'image');
+    const absolutePath = path.resolve(process.env.HOME || '', 'workspace/sage/agent_home', localPath);
+
+    try {
+      expect(localPath).toBe(`workspace/uploads/images/${fileKey}.png`);
+      expect(fs.existsSync(absolutePath)).toBe(true);
+    } finally {
+      fs.rmSync(absolutePath, { force: true });
+    }
+  });
+});
+
+describe('FeishuService.processImagesInMarkdown', () => {
+  it('uploads local images outside fenced code blocks only', async () => {
+    const service = createFeishuServiceWithInternals() as any;
+    const uploaded: string[] = [];
+    service.uploadImage = async (src: string) => {
+      uploaded.push(src);
+      return `img_uploaded_${uploaded.length}`;
+    };
+
+    const result = await service.processImagesInMarkdown([
+      '正文图：![outside](workspace/uploads/images/outside.png)',
+      '',
+      '```text',
+      '代码块里展示原文：![inside](workspace/uploads/images/inside.png)',
+      '```',
+      '',
+      '远程图：![remote](https://example.com/remote.png)',
+    ].join('\n'));
+
+    expect(result).toContain('正文图：![outside](img_uploaded_1)');
+    expect(result).toContain('代码块里展示原文：![inside](workspace/uploads/images/inside.png)');
+    expect(result).toContain('远程图：![remote](https://example.com/remote.png)');
+    expect(uploaded).toEqual(['workspace/uploads/images/outside.png']);
   });
 });
 
