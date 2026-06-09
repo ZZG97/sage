@@ -1,0 +1,8 @@
+# Raw runtime material can contain private user text, stack traces, and local
+# paths. Keep only sanitized summaries in tracked markdown files.
+artifacts/
+tmp/
+*.log
+*.log.*
+*.sqlite
+*.db

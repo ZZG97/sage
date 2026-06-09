@@ -25,6 +25,12 @@ interface RunAgentForOwnerOptions {
   reuseConversationId?: string;
 }
 
+interface RunAgentToCardResult {
+  replyMessageId?: string;
+  status: 'success' | 'failed' | 'cancelled';
+  error?: Error;
+}
+
 export class SageCore {
   private feishuService: FeishuService;
   private agent: AgentProvider;
@@ -258,7 +264,7 @@ export class SageCore {
     anchor:
       | { kind: 'reply'; parentMessageId: string }
       | { kind: 'proactive'; openId: string; title?: string };
-  }): Promise<{ replyMessageId: string } | null> {
+  }): Promise<RunAgentToCardResult> {
     const { prompt, conversationId, sessionId, sourceMessageIds, anchor } = opts;
 
     // Step 1: 发送初始 "thinking" 卡片
@@ -274,8 +280,9 @@ export class SageCore {
       const topic = this.normalizeProactiveTopic(anchor.title ?? prompt);
       const rootMessageId = await this.feishuService.sendTextToUser(anchor.openId, topic);
       if (!rootMessageId) {
-        this.logger.error('发送主动任务根消息失败，无 messageId');
-        return null;
+        const error = new Error('发送主动任务根消息失败，无 messageId');
+        this.logger.error(error.message);
+        return { status: 'failed', error };
       }
 
       this.rememberMessageConversation(rootMessageId, conversationId);
@@ -291,8 +298,9 @@ export class SageCore {
     }
 
     if (!replyMessageId) {
-      this.logger.error('发送初始卡片失败，无 messageId');
-      return null;
+      const error = new Error('发送初始卡片失败，无 messageId');
+      this.logger.error(error.message);
+      return { status: 'failed', error };
     }
 
     // 追踪活跃卡片（含 abort 控制器）
@@ -319,6 +327,7 @@ export class SageCore {
     let lastPatchTime = 0;
     let currentReplyMessageId = replyMessageId;
     const PATCH_INTERVAL = 1500;
+    let runError: Error | undefined;
 
     try {
       // 用 Promise.race 实现可中断的流式消费：abort 信号能立即打断等待中的 next()
@@ -406,7 +415,8 @@ export class SageCore {
       }
     } catch (error: any) {
       this.logger.error('Agent 流式处理异常:', error);
-      resultText = resultText || `处理出错: ${error.message}`;
+      runError = error instanceof Error ? error : new Error(String(error));
+      resultText = resultText || `处理出错: ${runError.message}`;
     }
 
     // Step 3-5 用 try-finally 保护，确保 activeCards 一定被清理
@@ -494,7 +504,13 @@ export class SageCore {
       }
     }
 
-    return { replyMessageId: currentReplyMessageId };
+    if (runError) {
+      return { replyMessageId: currentReplyMessageId, status: 'failed', error: runError };
+    }
+    if (abortController.signal.aborted) {
+      return { replyMessageId: currentReplyMessageId, status: 'cancelled' };
+    }
+    return { replyMessageId: currentReplyMessageId, status: 'success' };
   }
 
   // ─── 斜杠命令 ───
@@ -1204,6 +1220,9 @@ export class SageCore {
       this.rememberMessageConversation(result.replyMessageId, conversationId);
       this.logger.info(`主动 agent 任务已发送: messageId=${result.replyMessageId}, session=${session.id}`);
     }
+    if (result.status === 'failed') {
+      throw result.error ?? new Error('主动 agent 任务失败');
+    }
   }
 
   private async runAgentInExistingConversation(prompt: string, conversationId: string): Promise<boolean> {
@@ -1244,6 +1263,9 @@ export class SageCore {
     if (result?.replyMessageId) {
       this.rememberMessageConversation(result.replyMessageId, conversationId);
       this.logger.info(`定时 agent 任务已复用 conversation: conversation=${conversationId}, session=${sessionId}, messageId=${result.replyMessageId}`);
+    }
+    if (result.status === 'failed') {
+      throw result.error ?? new Error('定时 agent 任务失败');
     }
     return true;
   }

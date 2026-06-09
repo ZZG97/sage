@@ -45,7 +45,7 @@ Before the session ends, **update `memory/USER.md`** and `memory/SOUL.md` if nec
 - Outdated or irrelevant information is cleaned up.
 
 ## Writing Style for `memory/` Files
-Dense, telegraphic short sentences. No filler words. Comma/semicolon-joined facts, not bullet lists. `**Bold**` paragraph titles instead of `##` headers. Prioritize information density and low token count.
+Always-loaded memory (`SOUL.md`, `USER.md`, `MEMORY.md`) should use dense, telegraphic short sentences; no filler words; `**Bold**` paragraph titles instead of `##` headers; prioritize information density and low token count. On-demand project memory should stay concise but scannable: compact paragraphs for facts, bullets/checklists for workflows, principles, decision standards, and execution steps. Workstreams and docs should optimize for maintainability and execution clarity over token compression.
 
 ## Memory
 All memory reads/writes go to `./memory/` (relative to `agent_home/`).

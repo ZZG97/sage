@@ -1,6 +1,6 @@
 // TaskScheduler — bunqueue-based task scheduler with dynamic task support
 // Replaces the old setInterval-based Scheduler
-import { Queue, Worker } from 'bunqueue/client';
+import { Queue, Worker, type JobOptions } from 'bunqueue/client';
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'fs';
 import { resolve } from 'path';
@@ -62,9 +62,15 @@ export interface WorkflowAgentStep {
 
 export type WorkflowStep = WorkflowShellStep | WorkflowAgentStep;
 
+export interface WorkflowJobOptions {
+  attempts?: number;
+  backoff?: number;
+}
+
 export interface WorkflowTaskPayload {
   version: 1;
   steps: WorkflowStep[];
+  jobOptions?: WorkflowJobOptions;
 }
 
 export interface DynamicTaskContext {
@@ -206,12 +212,38 @@ function summarizeWorkflowPayload(payload: WorkflowTaskPayload): string {
     .join('\n');
 }
 
+function normalizeWorkflowJobOptions(input: unknown): WorkflowJobOptions | undefined {
+  if (input == null) return undefined;
+  if (typeof input !== 'object') {
+    throw new Error('workflow.jobOptions 必须是对象');
+  }
+
+  const raw = input as Record<string, unknown>;
+  const options: WorkflowJobOptions = {};
+
+  if (raw.attempts !== undefined) {
+    if (typeof raw.attempts !== 'number' || !Number.isFinite(raw.attempts) || raw.attempts <= 0) {
+      throw new Error('workflow.jobOptions.attempts 必须是正数');
+    }
+    options.attempts = Math.floor(raw.attempts);
+  }
+
+  if (raw.backoff !== undefined) {
+    if (typeof raw.backoff !== 'number' || !Number.isFinite(raw.backoff) || raw.backoff < 0) {
+      throw new Error('workflow.jobOptions.backoff 必须是非负数');
+    }
+    options.backoff = Math.floor(raw.backoff);
+  }
+
+  return Object.keys(options).length > 0 ? options : undefined;
+}
+
 function normalizeWorkflowPayload(input: unknown): WorkflowTaskPayload {
   if (!input || typeof input !== 'object') {
     throw new Error('workflow payload 必须是对象');
   }
 
-  const raw = input as { version?: unknown; steps?: unknown };
+  const raw = input as { version?: unknown; steps?: unknown; jobOptions?: unknown };
   if (!Array.isArray(raw.steps) || raw.steps.length === 0) {
     throw new Error('workflow.steps 必须是非空数组');
   }
@@ -250,9 +282,12 @@ function normalizeWorkflowPayload(input: unknown): WorkflowTaskPayload {
     throw new Error(`workflow.steps[${index}].kind 仅支持 shell / agent`);
   });
 
+  const jobOptions = normalizeWorkflowJobOptions(raw.jobOptions);
+
   return {
     version: 1,
     steps,
+    ...(jobOptions ? { jobOptions } : {}),
   };
 }
 
@@ -744,13 +779,14 @@ export class TaskScheduler {
 
   private async registerDynamicTask(task: DynamicTask): Promise<void> {
     const jobData = this.buildDynamicJobData(task);
+    const jobOptions = this.buildDynamicJobOptions(task);
 
     if (task.trigger_at) {
       const delay = task.trigger_at - Date.now();
       if (delay <= 0) {
         throw new Error('triggerAt must be in the future');
       }
-      await this.queue.add('task', jobData, { delay, jobId: `dynamic:${task.id}` });
+      await this.queue.add('task', jobData, { ...jobOptions, delay, jobId: `dynamic:${task.id}` });
       this.logger.info(
         `注册一次性任务(${task.kind}): ${task.id}, 将在 ${new Date(task.trigger_at).toLocaleString('zh-CN', { timeZone: TIMEZONE })} 触发`,
       );
@@ -764,9 +800,16 @@ export class TaskScheduler {
     await this.queue.upsertJobScheduler(
       `dynamic:${task.id}`,
       { pattern: task.pattern, timezone: TIMEZONE },
-      { name: 'task', data: jobData },
+      { name: 'task', data: jobData, opts: jobOptions },
     );
     this.logger.info(`注册周期任务(${task.kind}): ${task.id}, pattern=${task.pattern}`);
+  }
+
+  private buildDynamicJobOptions(task: DynamicTask): JobOptions | undefined {
+    if (task.kind !== 'workflow' || !task.payload?.jobOptions) {
+      return undefined;
+    }
+    return task.payload.jobOptions;
   }
 
   private async unregisterDynamicTask(task: Pick<DynamicTask, 'id' | 'pattern' | 'trigger_at'>): Promise<void> {

@@ -1,0 +1,23 @@
+{
+  "kind": "workflow",
+  "title": "Sage 日志巡检",
+  "message": "定时巡检 Sage Operations 和最近日志，识别需要确认、继续观察、可忽略或日志等级候选的问题。",
+  "payload": {
+    "version": 1,
+    "steps": [
+      {
+        "id": "collect-log-evidence",
+        "kind": "shell",
+        "cwd": "/Users/zhangzhiguo/workspace/sage/agent_home",
+        "timeoutSec": 60,
+        "command": "printf '## Operations problem runs, last 7 days\\n'; sqlite3 -header -column /Users/zhangzhiguo/workspace/sage/data/operations.db \"SELECT datetime(started_at/1000,'unixepoch','localtime') AS started, operation_type, operation_name, status, substr(coalesce(summary,''),1,180) AS summary, substr(coalesce(error,''),1,180) AS error FROM operation_runs WHERE started_at >= (strftime('%s','now','-7 days')*1000) AND status IN ('failed','warning','running') ORDER BY started_at DESC LIMIT 30;\"; printf '\\n## Operations status summary, last 7 days\\n'; sqlite3 -header -column /Users/zhangzhiguo/workspace/sage/data/operations.db \"SELECT status, operation_type, operation_name, count(*) AS count, datetime(max(started_at)/1000,'unixepoch','localtime') AS latest FROM operation_runs WHERE started_at >= (strftime('%s','now','-7 days')*1000) GROUP BY status, operation_type, operation_name ORDER BY count DESC, latest DESC LIMIT 30;\"; printf '\\n## PM2 sage ERROR/WARN tail\\n'; tail -n 3000 /Users/zhangzhiguo/workspace/sage/logs/sage.log 2>/dev/null | rg -n \"\\\\[(ERROR|WARN)\\\\]|ERROR|WARN|失败|异常|拒绝|超时|timeout|failed|error\" | tail -n 80 || true; printf '\\n## PM2 sage-error tail\\n'; tail -n 80 /Users/zhangzhiguo/workspace/sage/logs/sage-error.log 2>/dev/null || true; printf '\\n## PM2 sage-dev ERROR/WARN tail\\n'; tail -n 3000 /Users/zhangzhiguo/workspace/sage/logs/sage-dev.log 2>/dev/null | rg -n \"\\\\[(ERROR|WARN)\\\\]|ERROR|WARN|失败|异常|拒绝|超时|timeout|failed|error\" | tail -n 80 || true; printf '\\n## PM2 sage-dev-error tail\\n'; tail -n 80 /Users/zhangzhiguo/workspace/sage/logs/sage-dev-error.log 2>/dev/null || true"
+      },
+      {
+        "id": "analyze-log-evidence",
+        "kind": "agent",
+        "title": "Sage 日志巡检分析",
+        "prompt": "读取并遵守 /Users/zhangzhiguo/workspace/sage/agent_home/workstreams/sage-log-inspection/README.md 和 state.md。前一步 shell 已收集最近 Operations/PM2 证据；不要重复运行收集命令，优先读取 workflow runDir 中的 stdout/stderr 文件。只分析，不修改代码，不重启/停止任何服务，不发送完整原始日志。把结果按以下分组输出：1. 需要确认，2. 继续观察，3. 可忽略/日志等级候选。每条都给 disposition（noise_or_bad_level / fix_candidate / watch / no_action）、简短证据、建议下一步。只在 state.md 中追加或更新脱敏后的稳定结论，不记录完整用户消息、token、完整路径大段日志或原始 stdout/stderr。如果建议修代码，必须明确等待老张确认。"
+      }
+    ]
+  }
+}
