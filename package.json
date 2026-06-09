@@ -1,7 +1,7 @@
 {
   "name": "sage",
   "version": "1.0.0",
-  "description": "个人内部AI助手，通过飞书交互，集成OpenCode AI能力",
+  "description": "个人内部AI助手，通过飞书交互，支持多 Agent provider 和本地应用能力",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
