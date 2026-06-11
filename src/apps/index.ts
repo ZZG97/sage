@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { Logger } from '../utils';
 import { createDebugRoutes } from './debug/routes';
 import { createHealthRoutes } from './health/routes';
+import { createInvestmentRoutes } from './investment/routes';
 import { createManagementRoutes } from './management/routes';
 import { createOperationsRoutes } from './operations/routes';
 import { createRssRoutes } from './rss/routes';
@@ -27,6 +28,7 @@ interface AppDefinition {
 const apps: AppDefinition[] = [
   { name: 'debug', path: '/apps/debug', createRoutes: () => createDebugRoutes() },
   { name: 'health', path: '/apps/health', createRoutes: () => createHealthRoutes() },
+  { name: 'investment', path: '/apps/investment', createRoutes: () => createInvestmentRoutes() },
   { name: 'management', path: '/apps/management', createRoutes: (ctx) => createManagementRoutes(ctx.sageCore, ctx.scheduler) },
   { name: 'operations', path: '/apps/operations', createRoutes: () => createOperationsRoutes() },
   { name: 'rss', path: '/apps/rss', createRoutes: () => createRssRoutes() },
