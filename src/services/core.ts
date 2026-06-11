@@ -1,4 +1,4 @@
-import { FeishuService, CARD_SIZE_LIMIT, splitMarkdownByTables } from './feishu';
+import { FeishuService } from './feishu';
 import { AgentProvider } from '../agent';
 import { FallbackAgentProvider } from '../agent/fallback-provider';
 import type { AgentEvent } from '../agent/types';
@@ -7,6 +7,7 @@ import { Logger, AppError, patchRequestContext, sanitizeLogValue } from '../util
 import { appConfig } from '../config';
 import { MessageContext } from '../types';
 import { execSync } from 'child_process';
+import type { AssistantResponder, MessageGateway, ResponseAnchor, ResponseBinding } from './message-gateway';
 
 // ─── 常量 ───
 const DRAIN_TIMEOUT = 30_000; // drain 最多等 30s
@@ -17,7 +18,7 @@ interface ActiveRun {
   conversationId: string;
   sourceMessageIds: Set<string>;
   abortController: AbortController;
-  replyMessageIds: Set<string>;
+  responder: AssistantResponder;
   cancelReason?: string;
 }
 
@@ -25,22 +26,19 @@ interface RunAgentForOwnerOptions {
   reuseConversationId?: string;
 }
 
-interface RunAgentToCardResult {
+interface RunAgentTurnResult {
   replyMessageId?: string;
   status: 'success' | 'failed' | 'cancelled';
   error?: Error;
 }
 
 export class SageCore {
-  private feishuService: FeishuService;
+  private messageGateway: MessageGateway;
   private agent: AgentProvider;
   private historyStore: HistoryStore;
   private logger: Logger;
   private isRunning: boolean = false;
   private isDraining: boolean = false;
-
-  // 活跃卡片追踪：replyMessageId -> { conversationId, startTime, abortController }
-  private activeCards: Map<string, { conversationId: string; startTime: number; abortController: AbortController }> = new Map();
 
   // 当前正在执行的 agent run。用于把撤回的用户消息映射到正在跑的任务。
   private activeRuns: Map<string, ActiveRun> = new Map();
@@ -56,15 +54,15 @@ export class SageCore {
   private processingConversations: Set<string> = new Set();
   private pendingMessages: Map<string, MessageContext[]> = new Map();
 
-  constructor(agent: AgentProvider, historyStore: HistoryStore) {
+  constructor(agent: AgentProvider, historyStore: HistoryStore, messageGateway: MessageGateway = new FeishuService(appConfig.feishu)) {
     this.logger = new Logger('SageCore');
     this.agent = agent;
     this.historyStore = historyStore;
-    this.feishuService = new FeishuService(appConfig.feishu);
+    this.messageGateway = messageGateway;
 
-    // 设置飞书消息处理器（不再返回 string，SageCore 自行控制卡片）
-    this.feishuService.setMessageHandler(this.handleFeishuMessage.bind(this));
-    this.feishuService.setMessageRecallHandler(this.handleMessageRecall.bind(this));
+    // 设置消息处理器（不再返回 string，SageCore 自行控制输出生命周期）
+    this.messageGateway.setMessageHandler(this.handleIncomingMessage.bind(this));
+    this.messageGateway.setMessageRecallHandler(this.handleMessageRecall.bind(this));
 
     // 为 FallbackAgentProvider 注入历史查询能力
     if (agent instanceof FallbackAgentProvider) {
@@ -74,44 +72,18 @@ export class SageCore {
     }
 
     // 注入 DB 去重（重启后兜底）
-    this.feishuService.setDedupFn((eventId) => this.historyStore.isDuplicateEvent(eventId));
-
-    // 回复后飞书创建 thread 时，给 conversation 补上 thread_id。
-    // message_id 和 thread_id 是飞书的两个外部标识，内部状态只挂 conversationId。
-    this.feishuService.setThreadCreatedHandler((messageId, threadId) => {
-      const conversationId =
-        this.messageConversations.get(messageId)
-        ?? this.historyStore.getSessionByFirstMessageId(messageId)?.id
-        ?? this.historyStore.getSessionByThreadId(threadId)?.id;
-
-      if (!conversationId) {
-        this.logger.warn(`收到 thread_id 但未找到 conversation: messageId=${messageId}, threadId=${threadId}`);
-        return;
-      }
-
-      const existing = this.historyStore.getSessionByThreadId(threadId);
-      if (existing && existing.id !== conversationId) {
-        this.logger.warn(`thread_id 已绑定到其他 conversation: threadId=${threadId}, existing=${existing.id}, current=${conversationId}`);
-        return;
-      }
-
-      this.historyStore.setConversationThreadId(conversationId, threadId);
-      this.messageConversations.set(messageId, conversationId);
-      this.threadConversations.set(threadId, conversationId);
-      this.logger.info(`conversation 绑定 thread_id: conversation=${conversationId}, parentMessage=${messageId}, threadId=${threadId}`);
-    });
+    this.messageGateway.setDedupFn((eventId) => this.historyStore.isDuplicateEvent(eventId));
   }
 
-  // 处理飞书消息（主入口）— 排队 + 流式卡片生命周期
-  private async handleFeishuMessage(ctx: MessageContext): Promise<void> {
+  // 处理用户消息（主入口）— 排队 + 流式卡片生命周期
+  async handleIncomingMessage(ctx: MessageContext): Promise<void> {
     // 正在关闭中，拒绝新消息
     if (this.isDraining) {
       this.logger.info(`服务正在关闭，忽略消息: ${ctx.messageId}`);
       try {
-        await this.feishuService.replyCard(
-          ctx.messageId,
-          this.feishuService.buildStreamingCard([], false, '⚠️ 服务正在重启，请稍后重试。'),
-        );
+        await this.messageGateway
+          .createResponder({ kind: 'reply', parentMessageId: ctx.messageId })
+          .complete({ events: [], text: '⚠️ 服务正在重启，请稍后重试。' });
       } catch { /* best effort */ }
       return;
     }
@@ -120,10 +92,9 @@ export class SageCore {
     const commandResult = this.handleSlashCommand(ctx);
     if (commandResult === 'async') return;
     if (commandResult !== null) {
-      await this.feishuService.replyCard(
-        ctx.messageId,
-        this.feishuService.buildStreamingCard([], false, commandResult),
-      );
+      await this.messageGateway
+        .createResponder({ kind: 'reply', parentMessageId: ctx.messageId })
+        .complete({ events: [], text: commandResult });
       return;
     }
 
@@ -226,7 +197,7 @@ export class SageCore {
         agentSessionId: sessionId,
       });
 
-      await this.runAgentToCard({
+      await this.runAgentTurn({
         prompt: processedMessage,
         conversationId,
         sessionId,
@@ -239,98 +210,76 @@ export class SageCore {
 
       if (error instanceof AppError) {
         try {
-          await this.feishuService.replyCard(
-            ctx.messageId,
-            this.feishuService.buildErrorCard(`抱歉，处理消息时出现错误: ${error.message}`),
-          );
+          await this.messageGateway
+            .createResponder({ kind: 'reply', parentMessageId: ctx.messageId })
+            .fail(`抱歉，处理消息时出现错误: ${error.message}`);
         } catch { /* ignore */ }
       }
     }
   }
 
   /**
-   * 跑 agent 并渲染成流式卡片。通用能力，既服务于用户消息回复，
-   * 也服务于调度器主动触发的 agent 任务。
-   *
-   * 调用方负责：resolve conversationId、创建/恢复 session、保存用户消息（如适用）。
-   * 本方法负责：发初始卡片 → 流式消费 agent → 节流 PATCH → 超限拆卡
-   *          → 最终卡片 → 持久化 session/resume_id/events → activeCards 清理。
+   * 跑一次 assistant turn。Core 只处理 Sage 状态机；用户可见输出交给 responder。
    */
-  private async runAgentToCard(opts: {
+  private async runAgentTurn(opts: {
     prompt: string;
     conversationId: string;
     sessionId: string;
     sourceMessageIds?: string[];
-    anchor:
-      | { kind: 'reply'; parentMessageId: string }
-      | { kind: 'proactive'; openId: string; title?: string };
-  }): Promise<RunAgentToCardResult> {
+    anchor: ResponseAnchor;
+  }): Promise<RunAgentTurnResult> {
     const { prompt, conversationId, sessionId, sourceMessageIds, anchor } = opts;
-
-    // Step 1: 发送初始 "thinking" 卡片
-    const initialCard = this.feishuService.buildStreamingCard([], true);
-    let replyMessageId = '';
-    let initialThreadId: string | undefined;
     if (anchor.kind === 'reply') {
       this.rememberMessageConversation(anchor.parentMessageId, conversationId);
-      const r = await this.feishuService.replyCard(anchor.parentMessageId, initialCard);
-      replyMessageId = r.messageId;
-      initialThreadId = r.threadId;
-    } else {
-      const topic = this.normalizeProactiveTopic(anchor.title ?? prompt);
-      const rootMessageId = await this.feishuService.sendTextToUser(anchor.openId, topic);
-      if (!rootMessageId) {
+    }
+
+    const responder = this.messageGateway.createResponder(anchor);
+    const startBinding = await responder.start();
+    this.bindResponseToConversation(startBinding, conversationId);
+
+    if (anchor.kind === 'proactive') {
+      if (!startBinding.rootMessageId) {
         const error = new Error('发送主动任务根消息失败，无 messageId');
         this.logger.error(error.message);
         return { status: 'failed', error };
       }
 
-      this.rememberMessageConversation(rootMessageId, conversationId);
-      const bound = this.historyStore.setConversationFirstMessageId(conversationId, rootMessageId);
+      const bound = this.historyStore.setConversationFirstMessageId(conversationId, startBinding.rootMessageId);
       if (!bound) {
-        this.logger.warn(`主动任务根消息绑定 conversation first_message_id 失败: conversation=${conversationId}, messageId=${rootMessageId}`);
+        this.logger.warn(`主动任务根消息绑定 conversation first_message_id 失败: conversation=${conversationId}, messageId=${startBinding.rootMessageId}`);
       }
-      this.recordProactiveMessageAfterSend(rootMessageId, `[主动任务] ${prompt}`, anchor.openId);
-
-      const r = await this.feishuService.replyCard(rootMessageId, initialCard);
-      replyMessageId = r.messageId;
-      initialThreadId = r.threadId;
+      this.recordProactiveMessageAfterSend(startBinding.rootMessageId, `[主动任务] ${prompt}`, anchor.openId);
     }
 
-    if (!replyMessageId) {
-      const error = new Error('发送初始卡片失败，无 messageId');
+    if (!startBinding.messageId) {
+      const error = new Error('发送初始回复失败，无 messageId');
       this.logger.error(error.message);
       return { status: 'failed', error };
     }
 
-    // 追踪活跃卡片（含 abort 控制器）
+    if (startBinding.threadId) {
+      await this.agent.updateSessionContext?.(sessionId, this.buildAgentSessionContext(conversationId));
+    }
+
     const abortController = new AbortController();
     const activeRun: ActiveRun = {
       conversationId,
       sourceMessageIds: new Set(sourceMessageIds ?? (anchor.kind === 'reply' ? [anchor.parentMessageId] : [])),
       abortController,
-      replyMessageIds: new Set([replyMessageId]),
+      responder,
     };
     this.activeRuns.set(conversationId, activeRun);
-    this.rememberMessageConversation(replyMessageId, conversationId);
-    this.activeCards.set(replyMessageId, { conversationId, startTime: Date.now(), abortController });
 
-    if (initialThreadId) {
-      await this.agent.updateSessionContext?.(sessionId, this.buildAgentSessionContext(conversationId));
-    }
-
-    // Step 2: 流式处理 agent 消息（含卡片大小保护）
     const allEvents: AgentEvent[] = [];
-    let displayEvents: AgentEvent[] = []; // 当前卡片展示的事件
+    const displayEvents: AgentEvent[] = [];
     let resultText = '';
     let newSessionId: string | undefined;
-    let lastPatchTime = 0;
-    let currentReplyMessageId = replyMessageId;
-    const PATCH_INTERVAL = 1500;
+    let lastUpdateTime = 0;
+    const UPDATE_INTERVAL = 1500;
     let runError: Error | undefined;
+    let replyMessageId = startBinding.messageId;
 
     try {
-      // 用 Promise.race 实现可中断的流式消费：abort 信号能立即打断等待中的 next()
       const stream = this.agent.sendMessageStream(sessionId, prompt, abortController.signal);
       const abortPromise = new Promise<{ done: true; value: undefined }>((resolve) => {
         abortController.signal.addEventListener('abort', () => resolve({ done: true, value: undefined }), { once: true });
@@ -366,50 +315,13 @@ export class SageCore {
           continue;
         }
 
-        // 节流 PATCH
-        if (event.type === 'tool_call' || event.type === 'thinking' || event.type === 'text' || event.type === 'notice') {
+        if (this.shouldUpdateResponse(event)) {
           const now = Date.now();
-          if (now - lastPatchTime >= PATCH_INTERVAL) {
-            const card = this.feishuService.buildStreamingCard(displayEvents, true);
-
-            const stepsOnlyEvents = displayEvents.filter(e => e.type !== 'text');
-            const stepsCard = this.feishuService.buildStreamingCard(stepsOnlyEvents, true);
-            const stepsSize = Buffer.byteLength(stepsCard, 'utf-8');
-
-            if (stepsSize > CARD_SIZE_LIMIT) {
-              const closingCard = this.feishuService.buildStreamingCard(
-                displayEvents.slice(0, -1), false, '↓ 内容较长，后续内容见下方卡片',
-              );
-              await this.feishuService.patchCard(currentReplyMessageId, closingCard).catch(() => {});
-              this.activeCards.delete(currentReplyMessageId);
-
-              displayEvents = [event];
-              const newCard = this.feishuService.buildStreamingCard(displayEvents, true);
-              const { messageId: newMsgId } = await this.feishuService.replyCard(currentReplyMessageId, newCard);
-              if (newMsgId) {
-                currentReplyMessageId = newMsgId;
-                activeRun.replyMessageIds.add(currentReplyMessageId);
-                this.rememberMessageConversation(currentReplyMessageId, conversationId);
-                this.activeCards.set(currentReplyMessageId, { conversationId, startTime: Date.now(), abortController });
-              }
-              this.logger.info(`steps 超限 (${stepsSize}B)，已开新卡: ${currentReplyMessageId}`);
-            } else {
-              const patchOk = await this.feishuService.patchCard(currentReplyMessageId, card);
-              if (!patchOk) {
-                this.activeCards.delete(currentReplyMessageId);
-                displayEvents = [event];
-                const newCard = this.feishuService.buildStreamingCard(displayEvents, true);
-                const { messageId: newMsgId } = await this.feishuService.replyCard(currentReplyMessageId, newCard);
-                if (newMsgId) {
-                  currentReplyMessageId = newMsgId;
-                  activeRun.replyMessageIds.add(currentReplyMessageId);
-                  this.rememberMessageConversation(currentReplyMessageId, conversationId);
-                  this.activeCards.set(currentReplyMessageId, { conversationId, startTime: Date.now(), abortController });
-                }
-                this.logger.warn(`流式 PATCH 失败，已开新卡: ${currentReplyMessageId}`);
-              }
-            }
-            lastPatchTime = now;
+          if (now - lastUpdateTime >= UPDATE_INTERVAL) {
+            const binding = await responder.update({ events: displayEvents });
+            this.bindResponseToConversation(binding, conversationId);
+            if (binding?.messageId) replyMessageId = binding.messageId;
+            lastUpdateTime = now;
           }
         }
       }
@@ -419,9 +331,7 @@ export class SageCore {
       resultText = resultText || `处理出错: ${runError.message}`;
     }
 
-    // Step 3-5 用 try-finally 保护，确保 activeCards 一定被清理
     try {
-      // Step 3: 处理 fallback session 迁移
       if (newSessionId) {
         this.historyStore.updateAgentSessionId(conversationId, newSessionId);
         this.restoredSessions.add(newSessionId);
@@ -434,59 +344,14 @@ export class SageCore {
         this.historyStore.updateResumeId(conversationId, resumeId);
       }
 
-      // 记录 agent 事件
       this.historyStore.saveAgentEvents(conversationId, this.agent.name, allEvents);
 
-      // Step 4: 最终卡片更新
-      let finalText = resultText;
-      try {
-        finalText = await this.feishuService.processImagesInMarkdown(finalText);
-      } catch (err) {
-        this.logger.warn('处理回复中的图片失败:', err);
-      }
-
-      const textChunks = splitMarkdownByTables(finalText);
-      const firstChunkText = textChunks[0] || finalText;
-
-      const finalCard = this.feishuService.buildStreamingCard(displayEvents, false, firstChunkText);
-      const finalCardSize = Buffer.byteLength(finalCard, 'utf-8');
-
-      if (finalCardSize > CARD_SIZE_LIMIT) {
-        this.logger.info(`最终卡片超限 (${finalCardSize}B)，steps 留当前卡，文本开新卡 (${textChunks.length} 块)`);
-        const stepsCard = this.feishuService.buildStreamingCard(displayEvents, false, '↓ 回复内容见下方卡片');
-        await this.feishuService.patchCard(currentReplyMessageId, stepsCard).catch(() => {});
-
-        for (const chunk of textChunks) {
-          const chunkCard = this.feishuService.buildStreamingCard([], false, chunk);
-          if (Buffer.byteLength(chunkCard, 'utf-8') > CARD_SIZE_LIMIT) {
-            this.logger.warn(`文本 chunk 仍超限，降级为纯文本`);
-            await this.feishuService.replyText(currentReplyMessageId, chunk);
-          } else {
-            await this.feishuService.replyCard(currentReplyMessageId, chunkCard);
-          }
-        }
-      } else {
-        const patchOk = await this.feishuService.patchCard(currentReplyMessageId, finalCard);
-        if (!patchOk) {
-          await this.feishuService.replyText(currentReplyMessageId, finalText);
-        }
-
-        for (let i = 1; i < textChunks.length; i++) {
-          const chunkCard = this.feishuService.buildStreamingCard([], false, textChunks[i]);
-          await this.feishuService.replyCard(currentReplyMessageId, chunkCard);
-        }
-      }
-
-      // Step 5: 发送本地文件附件
-      try {
-        await this.feishuService.sendLocalFileAttachments(currentReplyMessageId, finalText);
-      } catch (err) {
-        this.logger.warn('发送文件附件失败:', err);
-      }
+      const finalBinding = await responder.complete({ events: displayEvents, text: resultText });
+      this.bindResponseToConversation(finalBinding, conversationId);
+      if (finalBinding.messageId) replyMessageId = finalBinding.messageId;
 
       this.logger.info(`处理完成，回复长度: ${resultText.length}`);
     } finally {
-      // 确保 resume_id 持久化（即使中断也要保存）和 activeCards 清理
       try {
         const effectiveSessionId = newSessionId ?? sessionId;
         const resumeId = this.agent.getResumeId(effectiveSessionId);
@@ -496,21 +361,18 @@ export class SageCore {
       } catch (err) {
         this.logger.warn('持久化 resume_id 失败:', err);
       }
-      for (const msgId of activeRun.replyMessageIds) {
-        this.activeCards.delete(msgId);
-      }
       if (this.activeRuns.get(conversationId) === activeRun) {
         this.activeRuns.delete(conversationId);
       }
     }
 
     if (runError) {
-      return { replyMessageId: currentReplyMessageId, status: 'failed', error: runError };
+      return { replyMessageId, status: 'failed', error: runError };
     }
     if (abortController.signal.aborted) {
-      return { replyMessageId: currentReplyMessageId, status: 'cancelled' };
+      return { replyMessageId, status: 'cancelled' };
     }
-    return { replyMessageId: currentReplyMessageId, status: 'success' };
+    return { replyMessageId, status: 'success' };
   }
 
   // ─── 斜杠命令 ───
@@ -585,28 +447,28 @@ export class SageCore {
     const processName = process.env.name || appConfig.processName || 'sage';
     this.logger.info(`收到 /restart 命令，准备优雅重启 (process: ${processName})`);
 
-    // 立即回复确认（这张卡片独立，不进 activeCards）
-    const { messageId: restartCardMsgId } = await this.feishuService.replyCard(
-      ctx.messageId,
-      this.feishuService.buildStreamingCard([], false,
-        `🔄 正在优雅重启...\n活跃卡片: ${this.activeCards.size}，等待处理完成后重启。`),
-    );
+    // 立即回复确认（这张回复独立，不进 activeRuns）
+    const restartResponder = this.messageGateway.createResponder({ kind: 'reply', parentMessageId: ctx.messageId });
+    await restartResponder.complete({
+      events: [],
+      text: `🔄 正在优雅重启...\n活跃任务: ${this.activeRuns.size}，等待处理完成后重启。`,
+    });
 
-    // Step 1: drain — 拒绝新消息，等待活跃卡片完成
+    // Step 1: drain — 拒绝新消息，等待活跃任务完成
     this.isDraining = true;
-    this.logger.info(`/restart: 进入 drain 模式，活跃卡片: ${this.activeCards.size}`);
+    this.logger.info(`/restart: 进入 drain 模式，活跃任务: ${this.activeRuns.size}`);
 
-    if (this.activeCards.size > 0) {
+    if (this.activeRuns.size > 0) {
       const drainStart = Date.now();
       await new Promise<void>((resolve) => {
         const check = () => {
-          if (this.activeCards.size === 0) {
-            this.logger.info('/restart: 所有活跃卡片已完成');
+          if (this.activeRuns.size === 0) {
+            this.logger.info('/restart: 所有活跃任务已完成');
             resolve();
             return;
           }
           if (Date.now() - drainStart >= DRAIN_TIMEOUT) {
-            this.logger.warn(`/restart: drain 超时，剩余 ${this.activeCards.size} 张`);
+            this.logger.warn(`/restart: drain 超时，剩余 ${this.activeRuns.size} 个任务`);
             resolve();
             return;
           }
@@ -616,24 +478,18 @@ export class SageCore {
       });
     }
 
-    // Step 2: 给残留卡片发 shutdown PATCH，然后清空追踪
-    if (this.activeCards.size > 0) {
-      const shutdownCard = this.feishuService.buildStreamingCard(
-        [], false, '⚠️ 服务正在重启，当前对话已中断。请重新发送消息继续。'
-      );
+    // Step 2: 给残留响应发 shutdown 状态，然后清空追踪
+    if (this.activeRuns.size > 0) {
       await Promise.allSettled(
-        Array.from(this.activeCards.keys()).map(msgId =>
-          this.feishuService.patchCard(msgId, shutdownCard).catch(() => {})
+        Array.from(this.activeRuns.values()).map(activeRun =>
+          activeRun.responder.close('⚠️ 服务正在重启，当前对话已中断。请重新发送消息继续。').catch(() => {})
         )
       );
-      this.activeCards.clear();
+      this.activeRuns.clear();
     }
 
     // Step 3: 更新重启确认卡片为完成状态
-    const doneCard = this.feishuService.buildStreamingCard(
-      [], false, '✅ 服务即将重启，请稍后发送消息继续。'
-    );
-    await this.feishuService.patchCard(restartCardMsgId, doneCard).catch(() => {});
+    await restartResponder.complete({ events: [], text: '✅ 服务即将重启，请稍后发送消息继续。' }).catch(() => {});
 
     // Step 4: 走 package script 重启，确保手动命令和聊天命令使用同一入口
     const restartCommand = processName === 'sage-dev'
@@ -641,7 +497,7 @@ export class SageCore {
       : 'bun run prod:restart';
     this.logger.info(`/restart: drain 完成，执行 ${restartCommand}`);
     try {
-      // 等待 drain 完成后再 restart，避免 pm2 kill 时 activeCards 还未清空
+      // 等待 drain 完成后再 restart，避免 pm2 kill 时 activeRuns 还未清空
       execSync(restartCommand, { timeout: 10_000 });
     } catch {
       // restart 会杀自己，这里大概率不会执行到
@@ -675,7 +531,7 @@ export class SageCore {
       `Agent: ${this.agent.name}`,
       `运行中: ${status.isRunning ? '是' : '否'}`,
       `活跃会话: ${status.sessionCount}`,
-      `活跃卡片: ${this.activeCards.size}`,
+      `活跃任务: ${this.activeRuns.size}`,
     ];
     if (this.agent instanceof FallbackAgentProvider) {
       lines.push(`自动降级: ${this.agent.autoFallbackEnabled ? '开启' : '关闭'}`);
@@ -801,6 +657,39 @@ export class SageCore {
         `取消运行中任务: conv=${activeRun.conversationId}, source=${source}, sourceMessages=${Array.from(activeRun.sourceMessageIds).join(',')}`,
       );
     }
+  }
+
+  private shouldUpdateResponse(event: AgentEvent): boolean {
+    return event.type === 'tool_call'
+      || event.type === 'thinking'
+      || event.type === 'text'
+      || event.type === 'notice';
+  }
+
+  private bindResponseToConversation(binding: ResponseBinding | void, conversationId: string): void {
+    if (!binding) return;
+
+    this.rememberMessageConversation(binding.rootMessageId, conversationId);
+    this.rememberMessageConversation(binding.messageId, conversationId);
+    for (const messageId of binding.messageIds ?? []) {
+      this.rememberMessageConversation(messageId, conversationId);
+    }
+
+    if (!binding.threadId) return;
+
+    const existing = this.historyStore.getSessionByThreadId(binding.threadId);
+    if (existing?.id === conversationId) {
+      this.rememberThreadConversation(binding.threadId, conversationId);
+      return;
+    }
+    if (existing && existing.id !== conversationId) {
+      this.logger.warn(`thread_id 已绑定到其他 conversation: threadId=${binding.threadId}, existing=${existing.id}, current=${conversationId}`);
+      return;
+    }
+
+    this.historyStore.setConversationThreadId(conversationId, binding.threadId);
+    this.rememberThreadConversation(binding.threadId, conversationId);
+    this.logger.info(`conversation 绑定 thread_id: conversation=${conversationId}, threadId=${binding.threadId}`);
   }
 
   private normalizeProactiveTopic(title?: string): string {
@@ -1012,7 +901,7 @@ export class SageCore {
     try {
       this.logger.info(`正在启动 Sage (agent: ${this.agent.name})...`);
       await this.agent.initialize();
-      await this.feishuService.start();
+      await this.messageGateway.start();
       this.isRunning = true;
       this.logger.info('Sage 核心服务启动成功');
       this.setupCleanupTask();
@@ -1033,20 +922,20 @@ export class SageCore {
 
       // Step 1: 进入 drain 模式，拒绝新消息
       this.isDraining = true;
-      this.logger.info(`进入 drain 模式，当前活跃卡片: ${this.activeCards.size}`);
+      this.logger.info(`进入 drain 模式，当前活跃任务: ${this.activeRuns.size}`);
 
-      // Step 2: 等待活跃卡片完成（超时强制退出）
-      if (this.activeCards.size > 0) {
+      // Step 2: 等待活跃任务完成（超时强制退出）
+      if (this.activeRuns.size > 0) {
         const drainStart = Date.now();
         await new Promise<void>((resolve) => {
           const check = () => {
-            if (this.activeCards.size === 0) {
-              this.logger.info('所有活跃卡片已完成');
+            if (this.activeRuns.size === 0) {
+              this.logger.info('所有活跃任务已完成');
               resolve();
               return;
             }
             if (Date.now() - drainStart >= DRAIN_TIMEOUT) {
-              this.logger.warn(`drain 超时 (${DRAIN_TIMEOUT}ms)，剩余 ${this.activeCards.size} 张活跃卡片`);
+              this.logger.warn(`drain 超时 (${DRAIN_TIMEOUT}ms)，剩余 ${this.activeRuns.size} 个活跃任务`);
               resolve();
               return;
             }
@@ -1056,23 +945,20 @@ export class SageCore {
         });
       }
 
-      // Step 3: 给仍在活跃的卡片发 shutdown PATCH
-      if (this.activeCards.size > 0) {
-        this.logger.info(`正在关闭 ${this.activeCards.size} 张残留卡片...`);
-        const shutdownCard = this.feishuService.buildStreamingCard(
-          [], false, '⚠️ 服务正在重启，当前对话已中断。请重新发送消息继续。'
-        );
-        const patchPromises = Array.from(this.activeCards.keys()).map(messageId =>
-          this.feishuService.patchCard(messageId, shutdownCard).catch(err => {
-            this.logger.warn(`shutdown PATCH 失败: ${messageId}`, err);
+      // Step 3: 给仍在活跃的响应发 shutdown 状态
+      if (this.activeRuns.size > 0) {
+        this.logger.info(`正在关闭 ${this.activeRuns.size} 个残留响应...`);
+        const closePromises = Array.from(this.activeRuns.values()).map(activeRun =>
+          activeRun.responder.close('⚠️ 服务正在重启，当前对话已中断。请重新发送消息继续。').catch(err => {
+            this.logger.warn(`shutdown 响应关闭失败: ${activeRun.conversationId}`, err);
           })
         );
-        await Promise.allSettled(patchPromises);
-        this.activeCards.clear();
+        await Promise.allSettled(closePromises);
+        this.activeRuns.clear();
       }
 
       // Step 4: 停止服务
-      await this.feishuService.stop();
+      await this.messageGateway.stop();
       await this.agent.destroy();
       this.isRunning = false;
       this.logger.info('Sage 已停止');
@@ -1108,7 +994,7 @@ export class SageCore {
       isRunning: this.isRunning,
       agentProvider: this.agent.name,
       sessionCount: this.agent.getActiveSessions().length,
-      activeCards: this.activeCards.size,
+      activeCards: this.activeRuns.size,
       isDraining: this.isDraining,
     };
   }
@@ -1160,7 +1046,7 @@ export class SageCore {
 
   /** 通过 open_id 向用户主动发消息，记录 session 供后续回复延续 */
   async sendProactiveMessage(openId: string, text: string): Promise<string> {
-    const messageId = await this.feishuService.sendTextToUser(openId, text);
+    const messageId = await this.messageGateway.sendProactiveText(openId, text);
     if (messageId) {
       this.recordProactiveMessageAfterSend(messageId, text, openId);
     }
@@ -1209,11 +1095,11 @@ export class SageCore {
       agentSessionId: session.id,
     });
 
-    const result = await this.runAgentToCard({
+    const result = await this.runAgentTurn({
       prompt,
       conversationId,
       sessionId: session.id,
-      anchor: { kind: 'proactive', openId, title },
+      anchor: { kind: 'proactive', openId, topic: this.normalizeProactiveTopic(title ?? prompt) },
     });
 
     if (result?.replyMessageId) {
@@ -1252,7 +1138,7 @@ export class SageCore {
       agentSessionId: sessionId,
     });
 
-    const result = await this.runAgentToCard({
+    const result = await this.runAgentTurn({
       prompt: scheduledPrompt,
       conversationId,
       sessionId,

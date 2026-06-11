@@ -28,6 +28,15 @@ function findMarkdownElements(card: any): any[] {
   return card.body.elements.filter((element: any) => element.tag === 'markdown');
 }
 
+function makeMarkdownTables(count: number): string {
+  return Array.from({ length: count }, (_, index) => [
+    `table ${index + 1}`,
+    '| A | B |',
+    '| - | - |',
+    `| ${index + 1} | value |`,
+  ].join('\n')).join('\n\n');
+}
+
 describe('splitMarkdownByTables', () => {
   it('keeps markdown without too many tables as a single chunk', () => {
     const markdown = [
@@ -229,6 +238,131 @@ describe('FeishuService.processImagesInMarkdown', () => {
     expect(result).toContain('代码块里展示原文：![inside](workspace/uploads/images/inside.png)');
     expect(result).toContain('远程图：![remote](https://example.com/remote.png)');
     expect(uploaded).toEqual(['workspace/uploads/images/outside.png']);
+  });
+});
+
+describe('FeishuService responder finalization', () => {
+  it('uses a safe streaming preview when interim text has too many tables', async () => {
+    const service = createFeishuServiceWithInternals() as any;
+    const patchedCards: string[] = [];
+    const markdown = makeMarkdownTables(7);
+
+    service.replyCard = async () => ({ messageId: 'reply_1', threadId: 'thread_1' });
+    service.patchCard = async (_messageId: string, cardJson: string) => {
+      patchedCards.push(cardJson);
+      return true;
+    };
+
+    const responder = service.createResponder({ kind: 'reply', parentMessageId: 'parent_1' });
+    await responder.start();
+    await responder.update({
+      events: [
+        { type: 'text', content: markdown, ts: '2026-06-12T03:18:52.000Z', persist: true },
+      ],
+    });
+
+    const card = parseCard(patchedCards[0]!);
+    const markdownElement = findMarkdownElements(card).at(-1);
+
+    expect(markdownElement.content).toBe('内容较长或表格较多，最终回复会拆分展示。');
+  });
+
+  it('splits final markdown with too many tables across multiple cards', async () => {
+    const service = createFeishuServiceWithInternals() as any;
+    const replyCards: string[] = [];
+    const patchedCards: string[] = [];
+    const markdown = makeMarkdownTables(7);
+
+    service.replyCard = async (_messageId: string, cardJson: string) => {
+      replyCards.push(cardJson);
+      return { messageId: `reply_${replyCards.length}`, threadId: 'thread_1' };
+    };
+    service.patchCard = async (_messageId: string, cardJson: string) => {
+      patchedCards.push(cardJson);
+      return true;
+    };
+    service.sendLocalFileAttachments = async () => {};
+    service.processImagesInMarkdown = async (text: string) => text;
+
+    const responder = service.createResponder({ kind: 'reply', parentMessageId: 'parent_1' });
+    await responder.start();
+    await responder.complete({
+      events: [
+        { type: 'text', content: markdown, ts: '2026-06-12T03:18:52.000Z', persist: true },
+      ],
+      text: markdown,
+    });
+
+    const finalMarkdown = findMarkdownElements(parseCard(patchedCards[0]!)).at(-1).content;
+    const remainingMarkdown = findMarkdownElements(parseCard(replyCards[1]!)).at(-1).content;
+
+    expect(finalMarkdown).toContain('table 1');
+    expect(finalMarkdown).toContain('table 5');
+    expect(finalMarkdown).not.toContain('table 6');
+    expect(remainingMarkdown).toContain('table 6');
+    expect(remainingMarkdown).toContain('table 7');
+  });
+
+  it('does not send remaining table chunks after final patch falls back to full text', async () => {
+    const service = createFeishuServiceWithInternals() as any;
+    const calls: any[] = [];
+    const markdown = makeMarkdownTables(6);
+
+    service.replyCard = async () => ({ messageId: 'reply_1', threadId: 'thread_1' });
+    service.patchCard = async () => false;
+    service.replyText = async (messageId: string, text: string) => {
+      calls.push({ type: 'replyText', messageId, text });
+    };
+    service.sendLocalFileAttachments = async (messageId: string, text: string) => {
+      calls.push({ type: 'attachments', messageId, text });
+    };
+    service.processImagesInMarkdown = async (text: string) => text;
+
+    const responder = service.createResponder({ kind: 'reply', parentMessageId: 'parent_1' });
+    await responder.start();
+    await responder.complete({ events: [], text: markdown });
+
+    expect(calls.filter(call => call.type === 'replyText')).toHaveLength(1);
+    expect(calls.find(call => call.type === 'replyText')?.text).toBe(markdown);
+    expect(calls.filter(call => call.type === 'attachments')).toHaveLength(1);
+  });
+
+  it('falls back to text when a remaining chunk card is too large', async () => {
+    const service = createFeishuServiceWithInternals() as any;
+    const replyCards: string[] = [];
+    const replyTexts: string[] = [];
+    const hugeTable = [
+      'huge table',
+      '| A |',
+      '| - |',
+      `| ${'x'.repeat(30 * 1024)} |`,
+    ].join('\n');
+    const smallTables = Array.from({ length: 5 }, (_, index) => [
+      `table ${index + 1}`,
+      '| A |',
+      '| - |',
+      `| ${index + 1} |`,
+    ].join('\n')).join('\n\n');
+    const markdown = [smallTables, hugeTable].join('\n\n');
+
+    service.replyCard = async (_messageId: string, cardJson: string) => {
+      replyCards.push(cardJson);
+      return { messageId: `reply_${replyCards.length}`, threadId: 'thread_1' };
+    };
+    service.patchCard = async () => true;
+    service.replyText = async (_messageId: string, text: string) => {
+      replyTexts.push(text);
+    };
+    service.sendLocalFileAttachments = async () => {};
+    service.processImagesInMarkdown = async (text: string) => text;
+
+    const responder = service.createResponder({ kind: 'reply', parentMessageId: 'parent_1' });
+    await responder.start();
+    await responder.complete({ events: [], text: markdown });
+
+    expect(replyTexts).toHaveLength(1);
+    expect(replyTexts[0]).toContain('huge table');
+    expect(replyCards).toHaveLength(1);
   });
 });
 

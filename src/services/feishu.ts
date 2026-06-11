@@ -2,8 +2,31 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BaseConfig, FeishuMessage, FeishuTextContent, MessageContext, MessageAttachment } from '../types';
-import { AgentEvent } from '../agent/types';
+import type { AgentEvent } from '../agent/types';
 import { createRequestId, Logger, AppError, runWithRequestContext, sanitizeLogValue } from '../utils';
+import type {
+  AssistantResponder,
+  AssistantResponseResult,
+  AssistantResponseSnapshot,
+  MessageGateway,
+  ResponseAnchor,
+  ResponseBinding,
+} from './message-gateway';
+import {
+  buildErrorCard as renderErrorCard,
+  buildStreamingCard as renderStreamingCard,
+  CARD_SIZE_LIMIT,
+  FENCED_CODE_BLOCK_REGEX,
+  hasTooManyMarkdownTables,
+  isRemoteImageSource,
+  MARKDOWN_IMAGE_REGEX,
+  splitMarkdownByTables,
+} from './card-renderer';
+
+export {
+  CARD_SIZE_LIMIT,
+  splitMarkdownByTables,
+} from './card-renderer';
 
 // 上传目录（相对于 agent_home）
 const AGENT_HOME_DIR = path.resolve(process.env.HOME || '', 'workspace/sage/agent_home');
@@ -11,89 +34,13 @@ const UPLOADS_DIR = path.join(AGENT_HOME_DIR, 'workspace/uploads');
 const IMAGES_DIR = path.join(UPLOADS_DIR, 'images');
 const FILES_DIR = path.join(UPLOADS_DIR, 'files');
 
-// 工具图标映射
-const TOOL_ICONS: Record<string, string> = {
-  Read: 'file-link-bitable_outlined',
-  Write: 'edit_outlined',
-  Edit: 'edit_outlined',
-  Bash: 'computer_outlined',
-  Glob: 'card-search_outlined',
-  Grep: 'doc-search_outlined',
-  WebSearch: 'search_outlined',
-  WebFetch: 'language_outlined',
-  Agent: 'robot_outlined',
-  Skill: 'file-link-mindnote_outlined',
-  // codex
-  command: 'computer_outlined',
-  file_change: 'edit_outlined',
-  web_search: 'search_outlined',
-};
-
-// 飞书卡片大小限制 30KB，预留 2KB buffer
-export const CARD_SIZE_LIMIT = 28 * 1024;
-
-const MAX_TABLES_PER_CARD = 5;
-const MARKDOWN_TABLE_REGEX = /^\|.+\|[ \t]*\n\|[\s:|-]+\|[ \t]*\n(?:\|.+\|[ \t]*\n?)+/gm;
-const MARKDOWN_IMAGE_REGEX = /!\[([^\]]*)\]\(([^)]+)\)/g;
-const FENCED_CODE_BLOCK_REGEX = /```[\s\S]*?```/g;
-
-/** 按表格数量拆分 markdown，每块最多 maxTables 个表格 */
-export function splitMarkdownByTables(markdown: string, maxTables: number = MAX_TABLES_PER_CARD): string[] {
-  const tables = markdown.match(MARKDOWN_TABLE_REGEX);
-  if (!tables || tables.length <= maxTables) return [markdown];
-
-  const regex = new RegExp(MARKDOWN_TABLE_REGEX.source, 'gm');
-  const positions: { start: number; end: number }[] = [];
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(markdown)) !== null) {
-    positions.push({ start: match.index, end: match.index + match[0].length });
-  }
-
-  const chunks: string[] = [];
-  let chunkStart = 0;
-  let count = 0;
-
-  for (let i = 0; i < positions.length; i++) {
-    count++;
-    if (count >= maxTables && i < positions.length - 1) {
-      chunks.push(markdown.slice(chunkStart, positions[i]!.end).trim());
-      chunkStart = positions[i]!.end;
-      count = 0;
-    }
-  }
-
-  const remaining = markdown.slice(chunkStart).trim();
-  if (remaining) chunks.push(remaining);
-  return chunks;
-}
-
-function isRemoteImageSource(src: string): boolean {
-  return src.startsWith('http://') || src.startsWith('https://') || src.startsWith('img_');
-}
-
-/**
- * 飞书卡片 markdown 中，图片语法只接受 URL 或飞书 image_key。
- * 本地绝对/相对路径会被当作 image_key 校验并触发 400。
- * 流式阶段先降级成普通文本，最终阶段再走 uploadImage() 替换。
- */
-function sanitizeCardMarkdown(markdown: string): string {
-  return markdown.replace(MARKDOWN_IMAGE_REGEX, (_full, altText: string, src: string) => {
-    if (isRemoteImageSource(src)) return _full;
-
-    const label = altText?.trim() || '图片';
-    const displayPath = path.isAbsolute(src) ? src : path.normalize(src);
-    return `**${label}**: \`${displayPath}\``;
-  });
-}
-
-export class FeishuService {
+export class FeishuService implements MessageGateway {
   private client: Lark.Client;
   private wsClient: Lark.WSClient;
   private eventDispatcher: Lark.EventDispatcher;
   private logger: Logger;
   private messageHandler?: (ctx: MessageContext) => Promise<void>;
   private messageRecallHandler?: (messageId: string) => Promise<void> | void;
-  private threadCreatedHandler?: (messageId: string, threadId: string) => void;
   private processedMessages: Set<string> = new Set();
   private messageThreadMap: Map<string, string> = new Map();
   private dbDedupFn?: (eventId: string) => boolean;
@@ -133,13 +80,13 @@ export class FeishuService {
     this.messageRecallHandler = handler;
   }
 
-  setThreadCreatedHandler(handler: (messageId: string, threadId: string) => void) {
-    this.threadCreatedHandler = handler;
-  }
-
   /** 注入 DB 去重函数（HistoryStore.isDuplicateEvent），重启后兜底 */
   setDedupFn(fn: (eventId: string) => boolean) {
     this.dbDedupFn = fn;
+  }
+
+  createResponder(anchor: ResponseAnchor): AssistantResponder {
+    return new FeishuAssistantResponder(this, anchor);
   }
 
   // ─── 事件处理 ───
@@ -478,7 +425,6 @@ export class FeishuService {
     if (threadId) {
       this.messageThreadMap.set(parentMessageId, threadId);
       this.logger.info(`记录 thread 映射: ${parentMessageId} -> ${threadId}`);
-      this.threadCreatedHandler?.(parentMessageId, threadId);
     }
 
     return { messageId, threadId };
@@ -524,149 +470,12 @@ export class FeishuService {
 
   /** 构建流式卡片（含中间步骤的 collapsible_panel + 流式文字） */
   buildStreamingCard(events: AgentEvent[], streaming: boolean, resultText?: string): string {
-    const steps: any[] = [];
-    let thinkingCount = 0;
-    let lastTextContent = '';
-    const notices: string[] = [];
-
-    for (const event of events) {
-      if (event.type === 'thinking') {
-        thinkingCount++;
-      } else if (event.type === 'tool_call') {
-        const icon = TOOL_ICONS[event.toolName || ''] || 'setting-inter_outlined';
-        steps.push({
-          tag: 'div',
-          icon: { tag: 'standard_icon', token: icon, color: 'grey' },
-          text: {
-            tag: 'plain_text',
-            text_color: 'grey',
-            text_size: 'notation',
-            content: event.content || event.toolName || 'tool',
-          },
-        });
-      } else if (event.type === 'notice' && event.content) {
-        notices.push(event.content);
-      } else if (event.type === 'text' && event.content) {
-        // 中间文本作为步骤保留在面板中，截断过长内容
-        const truncated = event.content.length > 200 ? event.content.slice(0, 200) + '...' : event.content;
-        steps.push({
-          tag: 'div',
-          icon: { tag: 'standard_icon', token: 'chat_outlined', color: 'grey' },
-          text: {
-            tag: 'plain_text',
-            text_color: 'grey',
-            text_size: 'notation',
-            content: truncated,
-          },
-        });
-        lastTextContent = event.content;
-      }
-    }
-
-    // 如果有 thinking 事件，加一个汇总步骤
-    if (thinkingCount > 0) {
-      steps.unshift({
-        tag: 'div',
-        icon: { tag: 'standard_icon', token: 'robot_outlined', color: 'grey' },
-        text: {
-          tag: 'plain_text',
-          text_color: 'grey',
-          text_size: 'notation',
-          content: 'Thinking...',
-        },
-      });
-    }
-
-    const elements: any[] = [];
-
-    // notice banner（fallback 等系统提示，始终显示在顶部，不被 resultText 覆盖）
-    if (notices.length > 0) {
-      elements.push({
-        tag: 'markdown',
-        text_size: 'notation',
-        text_align: 'left',
-        content: notices.join(' | '),
-      });
-    }
-
-    // collapsible_panel（有步骤时才显示）
-    if (steps.length > 0) {
-      const stepCount = steps.length;
-      const stepCountText = `${stepCount} step${stepCount === 1 ? '' : 's'}`;
-
-      elements.push({
-        tag: 'collapsible_panel',
-        expanded: streaming,
-        border: { color: 'grey-300', corner_radius: '6px' },
-        vertical_spacing: '2px',
-        header: {
-          title: {
-            tag: 'plain_text',
-            text_color: 'grey',
-            text_size: 'notation',
-            content: streaming ? `Working on it (${stepCountText})` : `Show ${stepCountText}`,
-          },
-          icon: { tag: 'standard_icon', token: 'right_outlined', color: 'grey' },
-          icon_position: 'right',
-          icon_expanded_angle: 90,
-        },
-        elements: steps,
-      });
-    }
-
-    // 文字内容：streaming 时显示最新一段中间 text，完成时显示 resultText
-    const displayText = streaming ? lastTextContent : resultText;
-    if (displayText) {
-      elements.push({
-        tag: 'markdown',
-        content: sanitizeCardMarkdown(displayText),
-      });
-    }
-
-    // streaming 指示器
-    if (streaming) {
-      elements.push({
-        tag: 'div',
-        icon: { tag: 'standard_icon', token: 'more_outlined', color: 'grey' },
-      });
-    }
-
-    // 确保 elements 不为空
-    if (elements.length === 0) {
-      elements.push({
-        tag: 'div',
-        text: { tag: 'plain_text', content: '' },
-      });
-    }
-
-    const summary = streaming
-      ? (lastTextContent ? lastTextContent.slice(0, 100) : (steps.length > 0 ? `Working on it (${steps.length} steps)` : 'Thinking...'))
-      : (resultText?.slice(0, 100) || '');
-
-    const card = {
-      schema: '2.0',
-      config: {
-        streaming_mode: true,
-        update_multi: true,
-        enable_forward: true,
-        width_mode: 'fill',
-        summary: { content: summary },
-      },
-      body: { elements },
-    };
-
-    return JSON.stringify(card);
+    return renderStreamingCard(events, streaming, resultText);
   }
 
   /** 构建错误卡片 */
   buildErrorCard(errorText: string): string {
-    return JSON.stringify({
-      schema: '2.0',
-      config: { wide_screen_mode: true },
-      body: {
-        elements: [{ tag: 'markdown', content: errorText }],
-      },
-    });
+    return renderErrorCard(errorText);
   }
 
   // ─── Phase 3: 上传图片/文件 ───
@@ -863,6 +672,10 @@ export class FeishuService {
     }
   }
 
+  async sendProactiveText(openId: string, text: string): Promise<string> {
+    return this.sendTextToUser(openId, text);
+  }
+
   /** 通过 open_id 向用户主动发送交互卡片，返回 message_id */
   async sendCardToUser(openId: string, cardJson: string): Promise<string> {
     try {
@@ -954,5 +767,287 @@ export class FeishuService {
       threadToKeep.forEach(([k, v]) => this.messageThreadMap.set(k, v));
       this.logger.info(`清理 thread 映射，保留最近 ${threadToKeep.length} 个`);
     }
+  }
+}
+
+class FeishuAssistantResponder implements AssistantResponder {
+  private readonly logger = new Logger('FeishuResponder');
+  private rootMessageId?: string;
+  private currentMessageId = '';
+  private threadId?: string;
+  private eventBaseIndex = 0;
+  private readonly messageIds = new Set<string>();
+
+  constructor(
+    private readonly service: FeishuService,
+    private readonly anchor: ResponseAnchor,
+  ) {}
+
+  async start(): Promise<ResponseBinding> {
+    if (this.currentMessageId) return this.binding();
+
+    const initialCard = this.service.buildStreamingCard([], true);
+    if (this.anchor.kind === 'reply') {
+      const response = await this.service.replyCard(this.anchor.parentMessageId, initialCard);
+      this.rememberReply(response);
+      return this.binding();
+    }
+
+    if (!this.rootMessageId) {
+      this.rootMessageId = await this.service.sendTextToUser(this.anchor.openId, this.anchor.topic);
+    }
+    if (!this.rootMessageId) return this.binding();
+
+    try {
+      const response = await this.service.replyCard(this.rootMessageId, initialCard);
+      this.rememberReply(response);
+    } catch (err) {
+      this.logger.warn(`主动任务根消息已发送但初始回复失败: root=${this.rootMessageId}`, err);
+    }
+    return this.binding();
+  }
+
+  async update(snapshot: AssistantResponseSnapshot): Promise<ResponseBinding | void> {
+    if (!this.currentMessageId) {
+      const binding = await this.start();
+      if (!binding.messageId) return binding;
+    }
+
+    const currentEvents = snapshot.events.slice(this.eventBaseIndex);
+    if (currentEvents.length === 0) return this.binding();
+
+    const stepsOnlyEvents = currentEvents.filter(event => event.type !== 'text');
+    const stepsCard = this.service.buildStreamingCard(stepsOnlyEvents, true);
+    const stepsSize = Buffer.byteLength(stepsCard, 'utf-8');
+
+    if (stepsSize > CARD_SIZE_LIMIT) {
+      const previousEvents = currentEvents.slice(0, -1);
+      const closingCard = this.service.buildStreamingCard(
+        previousEvents,
+        false,
+        '↓ 内容较长，后续内容见下方卡片',
+      );
+      await this.service.patchCard(this.currentMessageId, closingCard).catch(() => {});
+
+      const nextEvents = currentEvents.slice(-1);
+      const newCard = this.service.buildStreamingCard(nextEvents, true);
+      const response = await this.service.replyCard(this.currentMessageId, newCard);
+      this.rememberReply(response);
+      this.eventBaseIndex = Math.max(0, snapshot.events.length - nextEvents.length);
+      this.logger.info(`steps 超限 (${stepsSize}B)，已开新卡: ${this.currentMessageId}`);
+      return this.binding();
+    }
+
+    const card = this.buildStreamingUpdateCard(currentEvents);
+    const patchOk = await this.service.patchCard(this.currentMessageId, card);
+    if (!patchOk) {
+      const nextEvents = currentEvents.slice(-1);
+      const newCard = this.buildStreamingUpdateCard(nextEvents);
+      const response = await this.service.replyCard(this.currentMessageId, newCard);
+      this.rememberReply(response);
+      this.eventBaseIndex = Math.max(0, snapshot.events.length - nextEvents.length);
+      this.logger.warn(`流式 PATCH 失败，已开新卡: ${this.currentMessageId}`);
+    }
+
+    return this.binding();
+  }
+
+  async complete(result: AssistantResponseResult): Promise<ResponseBinding> {
+    if (!this.currentMessageId) {
+      return this.replyFinal(result);
+    }
+
+    await this.patchFinal(result);
+    return this.binding();
+  }
+
+  async fail(message: string): Promise<ResponseBinding | void> {
+    const card = this.service.buildErrorCard(message);
+    if (this.currentMessageId) {
+      await this.service.patchCard(this.currentMessageId, card).catch(() => {});
+      return this.binding();
+    }
+
+    if (this.anchor.kind === 'reply') {
+      const response = await this.service.replyCard(this.anchor.parentMessageId, card);
+      this.rememberReply(response);
+      return this.binding();
+    }
+
+    await this.start();
+    if (this.currentMessageId) {
+      await this.service.patchCard(this.currentMessageId, card).catch(() => {});
+    }
+    return this.binding();
+  }
+
+  async close(reason: string): Promise<void> {
+    if (!this.currentMessageId) return;
+    const shutdownCard = this.service.buildStreamingCard([], false, reason);
+    await this.service.patchCard(this.currentMessageId, shutdownCard).catch(() => {});
+  }
+
+  private buildStreamingUpdateCard(events: AgentEvent[]): string {
+    const card = this.service.buildStreamingCard(events, true);
+    const latestText = this.latestTextEvent(events)?.content || '';
+
+    if (
+      !latestText ||
+      (!hasTooManyMarkdownTables(latestText) && Buffer.byteLength(card, 'utf-8') <= CARD_SIZE_LIMIT)
+    ) {
+      return card;
+    }
+
+    const safeEvents = this.replaceLatestTextEvent(
+      events,
+      '内容较长或表格较多，最终回复会拆分展示。',
+    );
+    return this.service.buildStreamingCard(safeEvents, true);
+  }
+
+  private latestTextEvent(events: AgentEvent[]): AgentEvent | undefined {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i];
+      if (event?.type === 'text' && event.content) return event;
+    }
+    return undefined;
+  }
+
+  private replaceLatestTextEvent(events: AgentEvent[], content: string): AgentEvent[] {
+    const nextEvents = events.slice();
+    for (let i = nextEvents.length - 1; i >= 0; i--) {
+      const event = nextEvents[i];
+      if (event?.type === 'text') {
+        nextEvents[i] = { ...event, content };
+        break;
+      }
+    }
+    return nextEvents;
+  }
+
+  private async replyFinal(result: AssistantResponseResult): Promise<ResponseBinding> {
+    if (this.anchor.kind === 'proactive') {
+      await this.start();
+      if (this.currentMessageId) {
+        await this.patchFinal(result);
+      }
+      return this.binding();
+    }
+
+    const finalText = await this.prepareFinalText(result.text);
+    const chunks = splitMarkdownByTables(finalText);
+    const firstChunkText = chunks[0] || finalText;
+    const card = this.service.buildStreamingCard(result.events, false, firstChunkText);
+
+    if (Buffer.byteLength(card, 'utf-8') > CARD_SIZE_LIMIT) {
+      const response = await this.service.replyCard(
+        this.anchor.parentMessageId,
+        this.service.buildStreamingCard(result.events, false, '↓ 回复内容见下方卡片'),
+      );
+      this.rememberReply(response);
+      await this.replyTextChunks(chunks, finalText);
+      return this.binding();
+    }
+
+    const response = await this.service.replyCard(this.anchor.parentMessageId, card);
+    this.rememberReply(response);
+    await this.replyRemainingChunks(chunks);
+    await this.service.sendLocalFileAttachments(this.currentMessageId, finalText);
+    return this.binding();
+  }
+
+  private async patchFinal(result: AssistantResponseResult): Promise<void> {
+    const finalText = await this.prepareFinalText(result.text);
+    const chunks = splitMarkdownByTables(finalText);
+    const firstChunkText = chunks[0] || finalText;
+    const currentEvents = result.events.slice(this.eventBaseIndex);
+    const finalCard = this.service.buildStreamingCard(currentEvents, false, firstChunkText);
+    const finalCardSize = Buffer.byteLength(finalCard, 'utf-8');
+
+    if (finalCardSize > CARD_SIZE_LIMIT) {
+      this.logger.info(`最终卡片超限 (${finalCardSize}B)，steps 留当前卡，文本开新卡 (${chunks.length} 块)`);
+      const stepsCard = this.service.buildStreamingCard(currentEvents, false, '↓ 回复内容见下方卡片');
+      await this.service.patchCard(this.currentMessageId, stepsCard).catch(() => {});
+      await this.replyTextChunks(chunks, finalText);
+    } else {
+      const patchOk = await this.service.patchCard(this.currentMessageId, finalCard);
+      if (!patchOk) {
+        await this.service.replyText(this.currentMessageId, finalText);
+        await this.service.sendLocalFileAttachments(this.currentMessageId, finalText);
+        return;
+      }
+      await this.replyRemainingChunks(chunks);
+      await this.service.sendLocalFileAttachments(this.currentMessageId, finalText);
+    }
+  }
+
+  private async prepareFinalText(text: string): Promise<string> {
+    try {
+      return await this.service.processImagesInMarkdown(text);
+    } catch (err) {
+      this.logger.warn('处理回复中的图片失败:', err);
+      return text;
+    }
+  }
+
+  private async replyTextChunks(chunks: string[], finalText: string): Promise<void> {
+    const anchorMessageId = this.currentMessageId;
+    for (const chunk of chunks) {
+      const chunkCard = this.service.buildStreamingCard([], false, chunk);
+      if (Buffer.byteLength(chunkCard, 'utf-8') > CARD_SIZE_LIMIT) {
+        this.logger.warn('文本 chunk 仍超限，降级为纯文本');
+        await this.service.replyText(anchorMessageId, chunk);
+      } else {
+        try {
+          const response = await this.service.replyCard(anchorMessageId, chunkCard);
+          this.rememberReply(response, false);
+        } catch (err) {
+          this.logger.warn('文本 chunk 卡片发送失败，降级为纯文本', err);
+          await this.service.replyText(anchorMessageId, chunk);
+        }
+      }
+    }
+    await this.service.sendLocalFileAttachments(anchorMessageId, finalText);
+  }
+
+  private async replyRemainingChunks(chunks: string[]): Promise<void> {
+    const anchorMessageId = this.currentMessageId;
+    for (let i = 1; i < chunks.length; i++) {
+      const chunkCard = this.service.buildStreamingCard([], false, chunks[i]!);
+      if (Buffer.byteLength(chunkCard, 'utf-8') > CARD_SIZE_LIMIT) {
+        this.logger.warn('文本 chunk 仍超限，降级为纯文本');
+        await this.service.replyText(anchorMessageId, chunks[i]!);
+        continue;
+      }
+
+      try {
+        const response = await this.service.replyCard(anchorMessageId, chunkCard);
+        this.rememberReply(response, false);
+      } catch (err) {
+        this.logger.warn('文本 chunk 卡片发送失败，降级为纯文本', err);
+        await this.service.replyText(anchorMessageId, chunks[i]!);
+      }
+    }
+  }
+
+  private rememberReply(response: { messageId: string; threadId?: string }, setCurrent = true): void {
+    if (response.messageId) {
+      if (setCurrent) {
+        this.currentMessageId = response.messageId;
+      }
+      this.messageIds.add(response.messageId);
+    }
+    if (response.threadId) {
+      this.threadId = response.threadId;
+    }
+  }
+
+  private binding(): ResponseBinding {
+    return {
+      rootMessageId: this.rootMessageId,
+      messageId: this.currentMessageId || undefined,
+      messageIds: Array.from(this.messageIds),
+      threadId: this.threadId,
+    };
   }
 }
