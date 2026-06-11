@@ -13,6 +13,7 @@ const DEFAULT_CANDIDATES = [
   'http://localhost:3001/apps/investment',
   'http://localhost:3000/apps/investment',
 ];
+const INVESTMENT_DATE_TIME_ZONE = 'Asia/Shanghai';
 
 class ApiError extends Error {
   constructor(
@@ -155,7 +156,14 @@ function takeRepeatedOption(args: string[], name: string): string[] {
 }
 
 function todayIsoDate(): string {
-  return new Date().toISOString().slice(0, 10);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: INVESTMENT_DATE_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const valueByType = new Map(parts.map((part) => [part.type, part.value]));
+  return `${valueByType.get('year')}-${valueByType.get('month')}-${valueByType.get('day')}`;
 }
 
 function usage(): never {
@@ -188,13 +196,13 @@ async function main(): Promise<number> {
   }
 
   if (command === 'refresh') {
-    const snapshotDate = takeOption(args, '--snapshot-date');
+    const snapshotDate = takeOption(args, '--snapshot-date') || todayIsoDate();
     const portfolioId = args.shift() || 'default';
     printJson(await request(
       base,
       'POST',
       `/portfolios/${encodeURIComponent(portfolioId)}/prices/refresh`,
-      snapshotDate ? { snapshot_date: snapshotDate } : {},
+      { snapshot_date: snapshotDate },
     ));
     return 0;
   }

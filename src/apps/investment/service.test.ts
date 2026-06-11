@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { describe, expect, it } from 'bun:test';
 import type { PriceQuoteProvider, QuoteFetchResult } from './prices';
 import { InvestmentRepository } from './repository';
-import { InvestmentService } from './service';
+import { formatInvestmentDate, InvestmentService } from './service';
 import type { Instrument, PriceQuote } from './types';
 
 class FakeQuoteProvider implements PriceQuoteProvider {
@@ -50,6 +50,10 @@ function createService(quoteProvider?: PriceQuoteProvider): InvestmentService {
 }
 
 describe('InvestmentService', () => {
+  it('uses Asia/Shanghai for default investment snapshot dates', () => {
+    expect(formatInvestmentDate(new Date('2026-06-11T17:00:00.000Z'))).toBe('2026-06-12');
+  });
+
   it('imports a holding snapshot and computes base weights', () => {
     const service = createService();
 

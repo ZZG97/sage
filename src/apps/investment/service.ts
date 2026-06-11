@@ -16,9 +16,21 @@ import type {
 
 const logger = new Logger('InvestmentService');
 const HOLDING_SOURCES = ['manual', 'csv', 'computed', 'price_refresh', 'carry_forward'] as const;
+const INVESTMENT_DATE_TIME_ZONE = 'Asia/Shanghai';
+
+export function formatInvestmentDate(date = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: INVESTMENT_DATE_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const valueByType = new Map(parts.map((part) => [part.type, part.value]));
+  return `${valueByType.get('year')}-${valueByType.get('month')}-${valueByType.get('day')}`;
+}
 
 function todayIsoDate(): string {
-  return new Date().toISOString().slice(0, 10);
+  return formatInvestmentDate();
 }
 
 function asFiniteNumber(value: unknown, field: string): number {
