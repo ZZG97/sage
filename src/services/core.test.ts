@@ -17,7 +17,7 @@ import { InMemoryMessageGateway } from './in-memory-message-gateway';
 import { SageCore } from './core';
 
 class FakeAgentProvider implements AgentProvider {
-  readonly name = 'fake-agent';
+  readonly name: string = 'fake-agent';
   private sessionCounter = 1;
   private sessions = new Map<string, AgentSession>();
   readonly receivedMessages: Array<{ sessionId: string; message: string }> = [];
@@ -112,11 +112,36 @@ class FakeAgentProvider implements AgentProvider {
   }
 }
 
+class IdleAgentProvider extends FakeAgentProvider {
+  readonly name = 'idle-agent';
+  aborted = false;
+
+  override async *sendMessageStream(
+    sessionId: string,
+    message: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<AgentEvent> {
+    this.receivedMessages.push({ sessionId, message });
+    await new Promise<void>((resolve) => {
+      if (signal?.aborted) {
+        this.aborted = true;
+        resolve();
+        return;
+      }
+      signal?.addEventListener('abort', () => {
+        this.aborted = true;
+        resolve();
+      }, { once: true });
+    });
+  }
+}
+
 const tempDirs: string[] = [];
 const originalRestartEnv = {
   OWNER_OPEN_ID: process.env.OWNER_OPEN_ID,
   name: process.env.name,
   SAGE_INSTANCE: process.env.SAGE_INSTANCE,
+  SAGE_AGENT_IDLE_TIMEOUT_MS: process.env.SAGE_AGENT_IDLE_TIMEOUT_MS,
 };
 
 afterEach(() => {
@@ -126,6 +151,7 @@ afterEach(() => {
   restoreEnv('OWNER_OPEN_ID', originalRestartEnv.OWNER_OPEN_ID);
   restoreEnv('name', originalRestartEnv.name);
   restoreEnv('SAGE_INSTANCE', originalRestartEnv.SAGE_INSTANCE);
+  restoreEnv('SAGE_AGENT_IDLE_TIMEOUT_MS', originalRestartEnv.SAGE_AGENT_IDLE_TIMEOUT_MS);
 });
 
 function restoreEnv(name: string, value: string | undefined): void {
@@ -344,6 +370,43 @@ describe('SageCore message gateway boundary', () => {
       expect(agent.receivedMessages).toHaveLength(0);
     } finally {
       destroy();
+    }
+  });
+
+  it('aborts and fails a provider stream that never produces events', async () => {
+    process.env.SAGE_AGENT_IDLE_TIMEOUT_MS = '20';
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sage-core-test-'));
+    tempDirs.push(dir);
+    const historyStore = new HistoryStore(path.join(dir, 'history.db'), 'test');
+    const agent = new IdleAgentProvider();
+    const gateway = new InMemoryMessageGateway();
+    const core = new SageCore(agent, historyStore, gateway);
+
+    try {
+      await gateway.emitMessage(testMessage());
+
+      expect(agent.aborted).toBe(true);
+
+      const completions = gateway.outboundMessages.filter((message) => message.type === 'response_complete');
+      expect(completions.at(-1)).toMatchObject({
+        type: 'response_complete',
+        text: '处理出错: Agent provider stream idle timeout after 20ms without events; run was aborted',
+      });
+
+      await gateway.emitMessage(testMessage({
+        text: '/stop',
+        messageId: 'om_stop_1',
+        threadId: 'test_thread_1',
+      }));
+
+      const stopCompletion = gateway.outboundMessages.filter((message) => message.type === 'response_complete').at(-1);
+      expect(stopCompletion).toMatchObject({
+        type: 'response_complete',
+        text: '当前话题没有正在执行的任务。',
+      });
+    } finally {
+      historyStore.destroy();
     }
   });
 });

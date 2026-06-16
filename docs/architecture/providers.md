@@ -13,7 +13,7 @@ The provider layer adapts multiple AI backends to one Sage runtime contract.
 - Resume ID reporting.
 - Optional session context updates.
 
-Provider streams emit `AgentEvent` values. Core consumes those events without knowing provider SDK internals.
+Provider streams emit `AgentEvent` values. Core consumes those events without knowing provider SDK internals. Core supervises stream idleness without changing this interface; if no event arrives before `SAGE_AGENT_IDLE_TIMEOUT_MS`, the current run is aborted and surfaced as a failed turn.
 
 ## Current Providers
 
@@ -37,6 +37,6 @@ Sage stores local conversation state in SQLite and stores provider session/resum
 ## Current Gaps
 
 - No circuit breaker or cooldown for repeatedly failing providers.
-- No Core-level idle timeout for stalled streams.
+- Core-level idle timeout exists for stalled streams, but provider-level circuit breaker and richer error classification are still missing.
 - Fallback behavior still depends partly on session ID prefixes.
 - Structured runner currently depends on provider support and should surface richer failure reasons for batch jobs.
