@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import * as Lark from '@larksuiteoapi/node-sdk';
 import fs from 'node:fs';
 import path from 'node:path';
 import { FeishuService, splitMarkdownByTables } from './feishu';
@@ -67,6 +68,26 @@ describe('splitMarkdownByTables', () => {
     expect(chunks[0]).toContain('table 5');
     expect(chunks[0]).not.toContain('table 6');
     expect(chunks[1]).toContain('table 6');
+  });
+});
+
+describe('FeishuService event handlers', () => {
+  it('registers bot p2p chat enter access events as known no-op events', () => {
+    const service = createFeishuServiceWithInternals() as any;
+    service.eventDispatcher = new Lark.EventDispatcher({
+      logger: {
+        error: () => {},
+        warn: () => {},
+        info: () => {},
+        debug: () => {},
+        trace: () => {},
+      },
+    });
+    service.setupEventHandlers();
+
+    const dispatcher = service.eventDispatcher;
+
+    expect(dispatcher.handles.has('im.chat.access_event.bot_p2p_chat_entered_v1')).toBe(true);
   });
 });
 

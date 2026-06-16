@@ -106,6 +106,9 @@ export class FeishuService implements MessageGateway {
             this.logger.error('异步处理消息撤回失败:', err);
           });
         },
+        'im.chat.access_event.bot_p2p_chat_entered_v1': async () => {
+          this.logger.debug('忽略飞书 bot_p2p_chat_entered 事件');
+        },
       })
       .register({
         'connection': async (data: any) => {
