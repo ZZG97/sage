@@ -84,6 +84,11 @@ export interface AppConfig {
   server: {
     port: number;
     host: string;
+    auth: {
+      required: boolean;
+      tokens: string[];
+      cookieName: string;
+    };
   };
   processName: string;
 }

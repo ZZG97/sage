@@ -44,6 +44,10 @@ function candidateBases(explicit?: string): string[] {
   return unique(DEFAULT_CANDIDATES);
 }
 
+function authToken(): string | undefined {
+  return process.env.SAGE_INTERNAL_HTTP_TOKEN || process.env.SAGE_HTTP_TOKEN;
+}
+
 function parseJsonText(text: string): JsonValue {
   if (!text) return null;
   try {
@@ -62,12 +66,14 @@ async function request(
 ): Promise<JsonValue> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const token = authToken();
   try {
     const response = await fetch(baseUrl.replace(/\/+$/u, '') + path, {
       method,
       signal: controller.signal,
       headers: {
         accept: 'application/json',
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -85,19 +91,26 @@ async function request(
 
 async function detectBase(explicit?: string): Promise<string> {
   const errors: string[] = [];
+  let sawUnauthorizedWithoutToken = false;
   for (const base of candidateBases(explicit)) {
     try {
       await request(base, 'GET', '/portfolios', undefined, 2_500);
       return base.replace(/\/+$/u, '');
     } catch (error) {
       if (error instanceof ApiError) {
+        if (error.status === 401 && !authToken()) {
+          sawUnauthorizedWithoutToken = true;
+        }
         errors.push(`${base}: ${error.status ?? 'connect'} ${JSON.stringify(error.body)}`);
       } else {
         errors.push(`${base}: ${String(error)}`);
       }
     }
   }
-  throw new Error(`No reachable Sage investment API. Tried:\n${errors.join('\n')}`);
+  const hint = sawUnauthorizedWithoutToken
+    ? '\nHint: missing SAGE_INTERNAL_HTTP_TOKEN or SAGE_HTTP_TOKEN in the Agent environment.'
+    : '';
+  throw new Error(`No reachable Sage investment API. Tried:\n${errors.join('\n')}${hint}`);
 }
 
 function printJson(value: JsonValue): void {
@@ -258,7 +271,13 @@ try {
   process.exit(await main());
 } catch (error) {
   if (error instanceof ApiError) {
-    printJson({ error: error.body, status: error.status });
+    printJson({
+      error: error.body,
+      status: error.status,
+      hint: error.status === 401 && !authToken()
+        ? 'Missing SAGE_INTERNAL_HTTP_TOKEN or SAGE_HTTP_TOKEN in the Agent environment.'
+        : undefined,
+    });
     process.exit(1);
   }
   console.error(error instanceof Error ? error.message : String(error));

@@ -82,19 +82,25 @@ export class DebugService {
   private readonly connections = new Map<string, Database>();
 
   listDatabases(): DebugDatabaseInfo[] {
-    return readdirSync(this.dataDir)
+    const databases: DebugDatabaseInfo[] = [];
+    for (const name of readdirSync(this.dataDir)
       .filter((file) => file.endsWith('.db'))
       .map((file) => file.slice(0, -3))
-      .sort()
-      .map((name) => {
+      .sort()) {
+      try {
         const db = this.getValidatedDatabase(name);
         const tableCount = (db.prepare(`
           SELECT COUNT(*) AS count
           FROM sqlite_master
           WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
         `).get() as { count: number }).count;
-        return { name, tableCount };
-      });
+        databases.push({ name, tableCount });
+      } catch {
+        // Historical backup DB files can be incomplete WAL snapshots; skip them
+        // so the debug browser remains usable for live Sage databases.
+      }
+    }
+    return databases;
   }
 
   listTables(databaseName: string): DebugTableInfo[] {

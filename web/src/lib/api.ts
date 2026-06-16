@@ -1,16 +1,53 @@
 // API client — 简单 fetch wrapper
 
+export class SageApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = 'SageApiError';
+  }
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
+  const headers = new Headers(options?.headers);
+  if (!headers.has('Content-Type') && options?.body !== undefined) {
+    headers.set('Content-Type', 'application/json');
+  }
+
   const res = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers,
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `HTTP ${res.status}`);
+    throw new SageApiError(body.message || body.error || `HTTP ${res.status}`, res.status, body.error);
   }
   return res.json();
 }
+
+// ─── HTTP Auth ───
+
+export interface HttpAuthStatus {
+  authRequired: boolean;
+  configured: boolean;
+  authenticated: boolean;
+}
+
+export const httpAuth = {
+  getStatus: () => request<HttpAuthStatus>('/auth/status'),
+  createSession: (token: string) =>
+    request<{ success: boolean; authRequired: boolean }>('/auth/session', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    }),
+  clearSession: () =>
+    request<{ success: boolean }>('/auth/session', {
+      method: 'DELETE',
+    }),
+};
 
 // ─── Management API ───
 

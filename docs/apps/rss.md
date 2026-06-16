@@ -25,6 +25,8 @@ FreshRSS subscribes to those generated feeds under the `Sage AI` category for An
 
 Generated feed URLs are excluded from source refresh and classifier input to avoid loops.
 
+Generated feed routes are currently not covered by the shared Sage HTTP auth middleware, because FreshRSS consumes them directly from Docker via `host.docker.internal`. If these feeds need private exposure later, use a feed-specific token rather than the admin/internal Sage HTTP tokens.
+
 ## Related Runtime State
 
 - `agent_home/memory/project_sage/rss_app.md`: hot code-side facts and active gaps.

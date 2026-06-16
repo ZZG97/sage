@@ -33,10 +33,9 @@ Core entities:
 - Uploaded medical images should be referenced by local attachment paths; do not expose `agent_home/workspace/uploads/`.
 - The agent must ask for confirmation before storing OCR or image-derived medical facts when the input is ambiguous.
 - The app and skill can organize records and reminders, but must not replace clinician diagnosis or give medical treatment instructions.
-- Health HTTP surfaces that read or mutate private state need a clear access policy before any wider exposure.
+- Health HTTP surfaces that read or mutate private state are protected by the shared Sage HTTP auth middleware. Keep `/apps/health/*` and related uploads behind that boundary before any wider exposure.
 
 ## Open Gaps
 
-- No repo-level auth middleware protects health APIs yet.
 - The skill still operates directly on SQLite for some workflows instead of going through a narrow app wrapper.
 - No dedicated repo doc exists yet for future health timeline, reminders, reports, or dashboard design.

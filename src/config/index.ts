@@ -1,6 +1,29 @@
 import { AppConfig } from '../types';
 import { AgentProviderConfig } from '../agent';
 
+function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+function uniqueNonEmpty(values: Array<string | undefined>): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const normalized = value?.trim();
+    if (normalized && !seen.has(normalized)) {
+      seen.add(normalized);
+      result.push(normalized);
+    }
+  }
+  return result;
+}
+
+const httpAuthTokens = uniqueNonEmpty([
+  process.env.SAGE_HTTP_TOKEN,
+  process.env.SAGE_INTERNAL_HTTP_TOKEN,
+]);
+
 export const appConfig: AppConfig = {
   feishu: {
     appId: process.env.FEISHU_APP_ID || '',
@@ -13,6 +36,11 @@ export const appConfig: AppConfig = {
   server: {
     port: parseInt(process.env.PORT || '3000', 10),
     host: process.env.HOST || '0.0.0.0',
+    auth: {
+      required: parseBooleanEnv(process.env.SAGE_HTTP_AUTH_REQUIRED, httpAuthTokens.length > 0),
+      tokens: httpAuthTokens,
+      cookieName: process.env.SAGE_HTTP_AUTH_COOKIE || 'sage_http_token',
+    },
   },
   processName: process.env.PROCESS_NAME || 'sage',
 };

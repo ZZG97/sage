@@ -6,6 +6,7 @@ import type { TaskScheduler } from '../services/task-scheduler';
 import { AppError, createRequestId, Logger, normalizeRequestId, runWithRequestContext } from '../utils';
 import { appConfig } from '../config';
 import { mountApps } from '../apps';
+import { createHttpAuthMiddleware, isHttpAuthConfigured, isHttpAuthEnabled, registerHttpAuthRoutes } from './http-auth';
 import { existsSync } from 'fs';
 import { join } from 'path';
 
@@ -31,10 +32,12 @@ export class WebServer {
 
   // 设置中间件
   private setupMiddleware() {
+    const auth = appConfig.server.auth;
+
     // CORS
     this.app.use('*', cors({
       origin: '*',
-      allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       allowHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
       exposeHeaders: ['X-Request-Id'],
     }));
@@ -63,10 +66,24 @@ export class WebServer {
         }
       });
     });
+
+    if (isHttpAuthEnabled(auth)) {
+      if (isHttpAuthConfigured(auth)) {
+        this.logger.info('HTTP Bearer auth 已启用');
+      } else {
+        this.logger.warn('HTTP auth 已要求，但未配置 SAGE_HTTP_TOKEN 或 SAGE_INTERNAL_HTTP_TOKEN');
+      }
+    } else {
+      this.logger.warn('HTTP auth 未启用，management/debug/private APIs 将保持裸访问');
+    }
+
+    this.app.use('*', createHttpAuthMiddleware(auth));
   }
 
   // 设置路由
   private setupRoutes() {
+    registerHttpAuthRoutes(this.app, appConfig.server.auth);
+
     // 健康检查
     this.app.get('/health', async (c) => {
       const status = this.sageCore.getStatus();

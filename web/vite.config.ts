@@ -11,6 +11,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      '/auth': { target: 'http://localhost:3001', changeOrigin: true },
       '/apps': { target: 'http://localhost:3001', changeOrigin: true },
       '/health': { target: 'http://localhost:3001', changeOrigin: true },
       '/status': { target: 'http://localhost:3001', changeOrigin: true },

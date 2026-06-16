@@ -12,9 +12,9 @@ user_invocable: true
 
 通过 Sage HTTP API 管理定时任务：创建提醒/周期任务、更新、查看、删除。
 
-**API Base:** `http://localhost:$(printenv PORT)/scheduler/tasks`（`PORT` 由 Sage 进程注入 env，自动区分 prod/dev）
+**API Helper:** `bun ~/workspace/sage/agent_home/scripts/sage-api.ts METHOD PATH [--json JSON]`
 
-**重要**：shell 里 `$PORT` 可能被 zsh profile 覆盖为空，必须用 `$(printenv PORT)` 取值。
+**重要**：不要裸 `curl` Sage API。统一使用 `sage-api.ts`，它会读取 `PORT` / `SAGE_API_BASE_URL` 并自动带 `SAGE_INTERNAL_HTTP_TOKEN` 或 `SAGE_HTTP_TOKEN`。
 
 ## API 接口
 
@@ -92,33 +92,29 @@ user_invocable: true
 ```bash
 # 示例：30分钟后提醒（纯文本）
 TRIGGER_AT=$(($(date +%s) * 1000 + 30 * 60 * 1000))
-curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
-  -H "Content-Type: application/json" \
-  -d "{\"kind\":\"message\",\"message\":\"⏰ 提醒：该开会了\",\"triggerAt\":${TRIGGER_AT}}"
+bun ~/workspace/sage/agent_home/scripts/sage-api.ts POST /scheduler/tasks \
+  --json "{\"kind\":\"message\",\"message\":\"⏰ 提醒：该开会了\",\"triggerAt\":${TRIGGER_AT}}"
 ```
 
 ```bash
 # 示例：1小时后让 agent 汇总天气（agent 类任务）
 TRIGGER_AT=$(($(date +%s) * 1000 + 60 * 60 * 1000))
-curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
-  -H "Content-Type: application/json" \
-  -d "{\"kind\":\"agent\",\"prompt\":\"帮我查一下北京天气并总结发给我\",\"triggerAt\":${TRIGGER_AT}}"
+bun ~/workspace/sage/agent_home/scripts/sage-api.ts POST /scheduler/tasks \
+  --json "{\"kind\":\"agent\",\"prompt\":\"帮我查一下北京天气并总结发给我\",\"triggerAt\":${TRIGGER_AT}}"
 ```
 
 ```bash
 # 示例：30分钟后回到当前话题继续处理（复用当前 conversation/session）
 TRIGGER_AT=$(($(date +%s) * 1000 + 30 * 60 * 1000))
-curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
-  -H "Content-Type: application/json" \
-  -d "{\"kind\":\"agent\",\"prompt\":\"继续这个话题：提醒用户回到刚才的问题，并基于当前上下文继续处理。\",\"reuseConversationId\":\"$(printenv SAGE_CONVERSATION_ID)\",\"triggerAt\":${TRIGGER_AT}}"
+bun ~/workspace/sage/agent_home/scripts/sage-api.ts POST /scheduler/tasks \
+  --json "{\"kind\":\"agent\",\"prompt\":\"继续这个话题：提醒用户回到刚才的问题，并基于当前上下文继续处理。\",\"reuseConversationId\":\"$(printenv SAGE_CONVERSATION_ID)\",\"triggerAt\":${TRIGGER_AT}}"
 ```
 
 ```bash
 # 示例：今天下午3点（用 date 计算）
 TRIGGER_AT=$(date -j -f "%Y-%m-%d %H:%M:%S" "2026-04-11 15:00:00" +%s)000
-curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
-  -H "Content-Type: application/json" \
-  -d "{\"message\":\"⏰ 提醒：该吃药了\",\"triggerAt\":${TRIGGER_AT}}"
+bun ~/workspace/sage/agent_home/scripts/sage-api.ts POST /scheduler/tasks \
+  --json "{\"message\":\"⏰ 提醒：该吃药了\",\"triggerAt\":${TRIGGER_AT}}"
 ```
 
 **注意**：macOS 用 `date -j -f` 格式，计算 epoch 秒后拼 `000` 变毫秒。
@@ -137,19 +133,16 @@ curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
 
 ```bash
 # 纯文本周期提醒
-curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
-  -H "Content-Type: application/json" \
-  -d '{"kind":"message","message":"💧 该喝水了","pattern":"0 * * * *"}'
+bun ~/workspace/sage/agent_home/scripts/sage-api.ts POST /scheduler/tasks \
+  --json '{"kind":"message","message":"💧 该喝水了","pattern":"0 * * * *"}'
 
 # 周期 agent 任务
-curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
-  -H "Content-Type: application/json" \
-  -d '{"kind":"agent","prompt":"汇总今天的 GitHub notifications 并发给我","pattern":"0 9 * * *"}'
+bun ~/workspace/sage/agent_home/scripts/sage-api.ts POST /scheduler/tasks \
+  --json '{"kind":"agent","prompt":"汇总今天的 GitHub notifications 并发给我","pattern":"0 9 * * *"}'
 
 # 周期 workflow：先 shell，再 agent
-curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
-  -H "Content-Type: application/json" \
-  -d '{
+bun ~/workspace/sage/agent_home/scripts/sage-api.ts POST /scheduler/tasks \
+  --json '{
     "kind":"workflow",
     "title":"RSS 定时摘要",
     "message":"先抓 RSS，再让 agent 汇总",
@@ -179,10 +172,10 @@ curl -s -X POST "http://localhost:$(printenv PORT)/scheduler/tasks" \
 
 ```bash
 # 活跃任务
-curl -s "http://localhost:$(printenv PORT)/scheduler/tasks" | python3 -m json.tool
+bun ~/workspace/sage/agent_home/scripts/sage-api.ts GET /scheduler/tasks
 
 # 全部（含已完成/已取消）
-curl -s "http://localhost:$(printenv PORT)/scheduler/tasks?all=true" | python3 -m json.tool
+bun ~/workspace/sage/agent_home/scripts/sage-api.ts GET '/scheduler/tasks?all=true'
 ```
 
 展示格式示例：
@@ -209,16 +202,14 @@ curl -s "http://localhost:$(printenv PORT)/scheduler/tasks?all=true" | python3 -
 
 ```bash
 # 更新纯文本提醒内容和 cron
-curl -s -X PATCH "http://localhost:$(printenv PORT)/scheduler/tasks/{task_id}" \
-  -H "Content-Type: application/json" \
-  -d '{"kind":"message","message":"⏰ 提醒：更新后的内容","pattern":"30 9 * * 1-5"}'
+bun ~/workspace/sage/agent_home/scripts/sage-api.ts PATCH /scheduler/tasks/{task_id} \
+  --json '{"kind":"message","message":"⏰ 提醒：更新后的内容","pattern":"30 9 * * 1-5"}'
 ```
 
 ```bash
 # 更新 workflow 的 agent prompt
-curl -s -X PATCH "http://localhost:$(printenv PORT)/scheduler/tasks/{task_id}" \
-  -H "Content-Type: application/json" \
-  -d '{
+bun ~/workspace/sage/agent_home/scripts/sage-api.ts PATCH /scheduler/tasks/{task_id} \
+  --json '{
     "kind":"workflow",
     "title":"RSS 定时摘要",
     "message":"先抓 RSS，再让 agent 汇总",
@@ -253,7 +244,7 @@ curl -s -X PATCH "http://localhost:$(printenv PORT)/scheduler/tasks/{task_id}" \
 先查看任务列表，找到 id，再删除：
 
 ```bash
-curl -s -X DELETE "http://localhost:$(printenv PORT)/scheduler/tasks/{task_id}"
+bun ~/workspace/sage/agent_home/scripts/sage-api.ts DELETE /scheduler/tasks/{task_id}
 ```
 
 如果用户说"取消那个XX提醒"，先 GET 列表，匹配 message 内容找到 id，确认后删除。
@@ -265,4 +256,4 @@ curl -s -X DELETE "http://localhost:$(printenv PORT)/scheduler/tasks/{task_id}"
 3. **确认**：创建前向用户确认时间和消息内容，避免误设
 4. **过期处理**：一次性任务的 triggerAt 必须是未来时间，否则 API 会报错
 5. **cron 验证**：确保 cron pattern 合法，5 位格式（分 时 日 月 周）
-6. **API 路由**：使用 `$PORT` 环境变量，自动适配 prod(3000)/dev(3001)
+6. **API 路由**：统一使用 `sage-api.ts`，自动适配 prod(3000)/dev(3001) 并携带 Sage HTTP token

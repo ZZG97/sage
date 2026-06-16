@@ -35,10 +35,10 @@ Small apps may omit files they do not need.
 - Repositories own SQL and persistence details.
 - App services should expose domain operations, not raw DB primitives.
 - Cross-app reuse should go through `src/shared/` or a deliberate shared service.
-- App HTTP surfaces that read private state or mutate state need a clear access policy.
+- App HTTP surfaces that read private state or mutate state must stay behind the shared Sage HTTP auth middleware.
+- Generated RSS feeds under `/apps/rss/feeds/*` are currently a deliberate public exception for FreshRSS consumption; protect them separately with a feed-specific token if that exposure changes.
 
 ## Current Gaps
 
-- Management, debug, health, and investment APIs do not yet have a unified auth middleware.
 - Debug can read local DB tables and should remain local/private or be gated.
 - Some app HTTP body parsing still uses loose types and should move toward boundary normalization.

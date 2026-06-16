@@ -68,13 +68,14 @@ Background flows must not make code changes, perform external side effects, chan
 
 Agent subprocesses inherit Sage runtime env, but shell profiles can shadow variables.
 
-Skills calling Sage HTTP APIs should use:
+Skills calling Sage HTTP APIs should use the Agent-side helper so base URL and auth stay consistent:
 
 ```bash
-http://localhost:$(printenv PORT)/...
+bun ~/workspace/sage/agent_home/scripts/sage-api.ts GET /scheduler/tasks
+bun ~/workspace/sage/agent_home/scripts/sage-api.ts POST /scheduler/tasks --json '{"kind":"message","message":"...","triggerAt":1712345678000}'
 ```
 
-Do not rely on `$PORT` in shell snippets when the command may run under a different shell/profile context.
+The helper reads `SAGE_API_BASE_URL` first, then falls back to `http://localhost:$PORT`, then `http://localhost:3000`. It sends `SAGE_INTERNAL_HTTP_TOKEN` or `SAGE_HTTP_TOKEN` as a Bearer token. Do not rely on raw `$PORT` or localhost bypasses in shell snippets when the command may run under a different shell/profile context.
 
 ## Logging
 

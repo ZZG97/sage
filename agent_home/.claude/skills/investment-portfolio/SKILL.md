@@ -29,7 +29,8 @@ user_invocable: true
 ## Operating Rules
 
 - Do the API calls for the user. Do not tell the user to run curl unless they explicitly ask for commands.
-- Use `scripts/investment_api.ts`; it uses `SAGE_INVESTMENT_BASE_URL` when set, otherwise the current Sage `PORT`, otherwise local dev/prod fallback ports for terminal testing.
+- Use `scripts/investment_api.ts`; it uses `SAGE_INVESTMENT_BASE_URL` when set, otherwise the current Sage `PORT`, otherwise local dev/prod fallback ports for terminal testing. It automatically sends `SAGE_INTERNAL_HTTP_TOKEN` or `SAGE_HTTP_TOKEN` when present.
+- If the wrapper returns 401, first check that the Agent environment has `SAGE_INTERNAL_HTTP_TOKEN` or `SAGE_HTTP_TOKEN`; do not bypass Sage HTTP auth with localhost assumptions.
 - Default to portfolio id `default` for real personal holdings. Use `test-*` only when explicitly testing.
 - If the API returns 404/connection refused while `PORT` is set, explain that the current running Sage instance may not have loaded the investment app yet; do not fall back to another Sage instance unless the user explicitly targets it.
 - Do not give buy/sell instructions. Summaries should focus on current positions, market value, weight, missing cost data, and data-source limitations.
