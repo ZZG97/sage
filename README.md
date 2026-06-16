@@ -61,15 +61,7 @@ Sage is managed by PM2:
 
 Both processes launch through `scripts/launch-sage.ts`, which loads `.env` or `.env.dev`, injects instance/process metadata, and guards obvious prod/dev mixups.
 
-Use PM2 package scripts for managed instances:
-
-```bash
-bun run dev:start
-bun run dev:restart
-bun run dev:logs
-bun run prod:restart
-bun run prod:logs
-```
+Use PM2 package scripts for managed instances. The canonical command list and safety rules live in `docs/development-workflow.md`.
 
 `bun run dev` and `bun run start` are raw launch commands used by the PM2 ecosystem. Agents should not use them to start another service instance, because that can create port conflicts.
 
@@ -122,8 +114,12 @@ Prefer `HOST=127.0.0.1` for local/private deployments. Expose services through T
 
 ## Key Docs
 
+- `docs/index.md`: canonical project docs entry point.
+- `docs/README.md`: docs structure and maintenance rules.
+- `docs/development-conventions.md`: development rules for code organization, boundaries, side effects, tests, and completion criteria.
+- `docs/development-workflow.md`: process control, prod/dev safety, logging, and verification workflow.
+- `docs/architecture/overview.md`: current architecture map.
 - `agent_home/memory/project_sage/index.md`: second-level Sage memory router.
-- `agent_home/memory/project_sage/dev_workflow.md`: required context before `src/` edits.
 - `docs/operations.md`: Operations ledger and instrumentation guide.
 - `agent_home/prompt-templates/README.md`: prompt generation rules.
 

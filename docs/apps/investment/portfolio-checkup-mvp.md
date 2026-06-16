@@ -1,5 +1,13 @@
 # Investment Portfolio Checkup MVP
 
+This is the product-domain MVP specification for Sage's investment app. It mixes current implementation notes with the proposed roadmap for full portfolio checkup; sections that describe Evidence / Fact / Signal / ReportRun, scheduled reports, or Feishu report delivery are design targets unless explicitly marked as implemented.
+
+## Status
+
+- Implemented today: holding import, portfolio overview, SH/SZ A-share and ETF price refresh through Sina quotes, `data/investment.db`, and the `investment-portfolio` skill.
+- Not implemented yet: evidence archive, fact extraction, signal builder, report runs, scheduled checkup reports, Feishu slash command, and frontend page.
+- Current user-facing checkup is a basic API-backed summary through the skill, not the full evidence-backed report described here.
+
 ## 1. 背景与目标
 
 Sage 需要一个投资研究能力，但第一版不应做成泛金融平台。MVP 选择“持仓追踪 / Portfolio Checkup”，围绕老张真实持仓和观察池，把信息采集、证据留存、事实抽取、信号构建、报告生成这条链路跑通。
