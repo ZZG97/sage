@@ -7,6 +7,7 @@ import { resolve } from 'path';
 import { createRequestId, Logger, runWithRequestContext } from '../utils';
 import type { AgentProvider } from '../agent/types';
 import { getOperationsService } from '../apps/operations/service';
+import { runDatabaseMigrations } from '../shared/db-migrations';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -325,41 +326,7 @@ export class TaskScheduler {
     const dbPath = resolve(import.meta.dir, `../../data/${dbFile}`);
     this.db = new Database(dbPath, { create: true });
     this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS dynamic_tasks (
-        id TEXT PRIMARY KEY,
-        message TEXT NOT NULL,
-        title TEXT,
-        payload TEXT,
-        context_json TEXT,
-        pattern TEXT,
-        trigger_at INTEGER,
-        status TEXT NOT NULL DEFAULT 'active',
-        created_at INTEGER NOT NULL
-      )
-    `);
-
-    const cols = this.db.query(`PRAGMA table_info(dynamic_tasks)`).all() as Array<{ name: string }>;
-    const hasKind = cols.some((c) => c.name === 'kind');
-    if (!hasKind) {
-      this.db.exec(`ALTER TABLE dynamic_tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'message'`);
-      this.logger.info('dynamic_tasks 表迁移：新增 kind 字段');
-    }
-    const hasTitle = cols.some((c) => c.name === 'title');
-    if (!hasTitle) {
-      this.db.exec(`ALTER TABLE dynamic_tasks ADD COLUMN title TEXT`);
-      this.logger.info('dynamic_tasks 表迁移：新增 title 字段');
-    }
-    const hasPayload = cols.some((c) => c.name === 'payload');
-    if (!hasPayload) {
-      this.db.exec(`ALTER TABLE dynamic_tasks ADD COLUMN payload TEXT`);
-      this.logger.info('dynamic_tasks 表迁移：新增 payload 字段');
-    }
-    const hasContextJson = cols.some((c) => c.name === 'context_json');
-    if (!hasContextJson) {
-      this.db.exec(`ALTER TABLE dynamic_tasks ADD COLUMN context_json TEXT`);
-      this.logger.info('dynamic_tasks 表迁移：新增 context_json 字段');
-    }
+    runDatabaseMigrations('scheduler', this.db, { logger: this.logger });
   }
 
   /** Register a built-in task (call before start) */

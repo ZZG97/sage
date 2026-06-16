@@ -59,6 +59,7 @@ Sage 当前组织方式：
 - `src/apps/{app}/`：产品域，包含 routes、service、repository、types。
 - `src/services/tasks/`：Scheduler 内置任务。
 - `src/shared/db.ts`：SQLite 连接入口，`getDatabase(name)` 映射到 `data/{name}.db`。
+- `src/shared/db-migrations.ts`：SQLite schema 和 structural migration 的集中入口。
 - `data/*.db`：系统持久状态。
 - `agent_home/workspace/outputs/`：面向用户的交付物和临时输出。
 
@@ -528,7 +529,7 @@ Feishu 交互：
 - 价格源失败时，是否允许用户在 Feishu 中补录价格。
 - 观察池和真实持仓是否共用 `Portfolio`，还是单独建 `Watchlist`。
 - 财报、解禁、分红日历第一版使用公开网页抓取，还是先手工维护。
-- `investment.db` 初期是否需要显式 migration 目录，还是先在 repository init 中维护 schema。
+- `investment.db` schema 维护在 `src/shared/db-migrations.ts`，后续字段变更继续追加 migration。
 
 ## 主 Agent Review 重点
 

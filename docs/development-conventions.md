@@ -56,6 +56,7 @@ Internal code should operate on typed domain objects, not raw external payloads.
 ## State And Storage
 
 - Persistent IDs must have a clear owner and lifecycle. Do not overload external message IDs as internal identity.
+- SQLite schema definitions and structural migrations belong in `src/shared/db-migrations.ts`; services and repositories should call the centralized runner rather than owning DDL inline.
 - Schema changes need a clear migration path and should be documented when they affect durable data.
 - App data belongs to the app's repository/service boundary. Cross-app data access should be deliberate and documented.
 - Do not read or write production DBs in tests. Use temp or in-memory DBs.

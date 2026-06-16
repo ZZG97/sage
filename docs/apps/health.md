@@ -16,7 +16,8 @@ Agent operation procedures live in the `health-manager` skill.
 
 Code paths:
 
-- `src/apps/health/service.ts`: `HealthService` and schema initialization.
+- `src/apps/health/service.ts`: `HealthService` domain operations.
+- `src/shared/db-migrations.ts`: `health` SQLite schema and migrations.
 - `src/apps/health/routes.ts`: HTTP routes mounted under `/apps/health`.
 - `data/health.db`: local SQLite database.
 - `agent_home/.claude/skills/health-manager/SKILL.md`: agent workflow for extracting and recording medical documents.

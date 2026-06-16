@@ -53,10 +53,11 @@ bunqueue scheduler
 - Provider abstraction supports multiple backends and lazy session restore.
 - Scheduler uses persistent dynamic tasks and records runs into Operations.
 - Apps are mounted under `/apps/{name}` and generally own their own service/repository boundary.
+- SQLite schemas and structural migrations are centralized in `src/shared/db-migrations.ts`.
 - Private HTTP surfaces are gated by Sage HTTP Bearer auth for management/debug/health/investment/operations/scheduler/uploads paths.
 
 ## Current Pressure Points
 
 - `SageCore`, `FeishuService`, and `TaskScheduler` are large stateful modules and should be split only along established ownership boundaries.
 - Provider reliability needs stronger timeout, circuit breaker, and explicit provider-session ownership.
-- Storage and migration conventions are not yet centralized across all DB owners.
+- Storage backup and restore conventions still need a dedicated operator runbook.

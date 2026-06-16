@@ -1,6 +1,7 @@
 // 健康管理 App — Service 层
 import { Database } from 'bun:sqlite';
 import { getDatabase } from '../../shared/db';
+import { runDatabaseMigrations } from '../../shared/db-migrations';
 import { Logger } from '../../utils';
 
 const logger = new Logger('HealthService');
@@ -73,69 +74,7 @@ export class HealthService {
 
   constructor() {
     this.db = getDatabase('health');
-    this.initSchema();
-  }
-
-  private initSchema(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS medical_records (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        visit_date TEXT NOT NULL,
-        hospital TEXT,
-        department TEXT,
-        doctor TEXT,
-        chief_complaint TEXT,
-        diagnosis TEXT,
-        medications TEXT,
-        examinations TEXT,
-        treatment TEXT,
-        doctor_advice TEXT,
-        follow_up_date TEXT,
-        cost REAL,
-        tags TEXT,
-        attachments TEXT,
-        raw_analysis TEXT,
-        summary TEXT,
-        created_at TEXT DEFAULT (datetime('now', 'localtime')),
-        updated_at TEXT DEFAULT (datetime('now', 'localtime'))
-      );
-
-      CREATE TABLE IF NOT EXISTS health_metrics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        record_id INTEGER NOT NULL,
-        category TEXT NOT NULL,
-        metric_name TEXT NOT NULL,
-        value TEXT NOT NULL,
-        numeric_value REAL,
-        unit TEXT,
-        reference_range TEXT,
-        is_abnormal INTEGER DEFAULT 0,
-        measured_at TEXT,
-        FOREIGN KEY (record_id) REFERENCES medical_records(id)
-      );
-
-      CREATE TABLE IF NOT EXISTS medication_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        record_id INTEGER,
-        medication_name TEXT NOT NULL,
-        generic_name TEXT,
-        dosage TEXT,
-        frequency TEXT,
-        route TEXT,
-        start_date TEXT,
-        end_date TEXT,
-        is_active INTEGER DEFAULT 1,
-        notes TEXT,
-        FOREIGN KEY (record_id) REFERENCES medical_records(id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_records_visit_date ON medical_records(visit_date);
-      CREATE INDEX IF NOT EXISTS idx_records_department ON medical_records(department);
-      CREATE INDEX IF NOT EXISTS idx_metrics_record_id ON health_metrics(record_id);
-      CREATE INDEX IF NOT EXISTS idx_metrics_name ON health_metrics(metric_name);
-      CREATE INDEX IF NOT EXISTS idx_medication_name ON medication_history(medication_name);
-      CREATE INDEX IF NOT EXISTS idx_medication_active ON medication_history(is_active);
-    `);
+    runDatabaseMigrations('health', this.db, { logger });
     logger.info('健康管理数据库 schema 已就绪');
   }
 

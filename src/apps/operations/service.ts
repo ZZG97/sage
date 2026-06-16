@@ -1,4 +1,5 @@
 import { getDatabase } from '../../shared/db';
+import { runDatabaseMigrations } from '../../shared/db-migrations';
 import { createRequestId, getRequestContext, Logger, sanitizeLogValue } from '../../utils';
 
 export type OperationStatus = 'running' | 'success' | 'warning' | 'failed' | 'cancelled';
@@ -131,7 +132,7 @@ export class OperationsService {
   private db = getDatabase('operations');
 
   constructor() {
-    this.initSchema();
+    runDatabaseMigrations('operations', this.db, { logger });
   }
 
   startRun(options: StartOperationRunOptions): OperationRunHandle {
@@ -335,36 +336,6 @@ export class OperationsService {
     return true;
   }
 
-  private initSchema(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS operation_runs (
-        id TEXT PRIMARY KEY,
-        operation_type TEXT NOT NULL,
-        operation_name TEXT NOT NULL,
-        trigger_type TEXT NOT NULL,
-        status TEXT NOT NULL,
-        started_at INTEGER NOT NULL,
-        finished_at INTEGER,
-        duration_ms INTEGER,
-        summary TEXT,
-        metrics_json TEXT NOT NULL DEFAULT '{}',
-        error TEXT,
-        metadata_json TEXT NOT NULL DEFAULT '{}',
-        request_id TEXT,
-        trace_id TEXT,
-        alerted_at INTEGER
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_operation_runs_started ON operation_runs(started_at);
-      CREATE INDEX IF NOT EXISTS idx_operation_runs_status ON operation_runs(status);
-      CREATE INDEX IF NOT EXISTS idx_operation_runs_type ON operation_runs(operation_type, operation_name, started_at);
-
-      CREATE TABLE IF NOT EXISTS operation_health_alerts (
-        alert_key TEXT PRIMARY KEY,
-        last_alerted_at INTEGER NOT NULL
-      );
-    `);
-  }
 }
 
 export function getOperationsService(): OperationsService {

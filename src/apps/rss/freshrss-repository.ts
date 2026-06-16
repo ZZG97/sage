@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { resolve } from 'path';
 import { getDatabase } from '../../shared/db';
+import { runDatabaseMigrations } from '../../shared/db-migrations';
 import { decideAdaptiveRefresh, detectFeedDomain, EMPTY_FEED_REFRESH_STATS, nextBackoffUntil, type RefreshState } from './refresh-policy';
 import type { FeedDomain, FeedRefreshCandidate, FeedRefreshStats, FreshRssEntry, FreshRssFeed, LabelResult, RefreshResult, RssPriority } from './types';
 
@@ -70,7 +71,7 @@ export class FreshRssRepository {
     this.freshDb.exec('PRAGMA busy_timeout = 5000');
     this.freshDb.exec('PRAGMA foreign_keys = ON');
     this.sidecarDb = getDatabase('rss-ai');
-    this.initSidecarSchema();
+    runDatabaseMigrations('rss-ai', this.sidecarDb);
   }
 
   listFeeds(limit = 1000): FreshRssFeed[] {
@@ -447,62 +448,6 @@ export class FreshRssRepository {
     return statsByFeedId;
   }
 
-  private initSidecarSchema(): void {
-    this.sidecarDb.exec(`
-      CREATE TABLE IF NOT EXISTS processed_entries (
-        entry_id INTEGER PRIMARY KEY,
-        feed_id INTEGER NOT NULL,
-        guid TEXT NOT NULL,
-        link TEXT NOT NULL,
-        content_hash TEXT NOT NULL,
-        priority TEXT NOT NULL,
-        topics_json TEXT NOT NULL,
-        labels_json TEXT NOT NULL,
-        confidence REAL NOT NULL,
-        reason TEXT NOT NULL,
-        fact_or_opinion TEXT NOT NULL,
-        model TEXT NOT NULL,
-        dry_run INTEGER NOT NULL DEFAULT 0,
-        cluster_id TEXT,
-        author_key TEXT,
-        summary TEXT,
-        processed_at TEXT NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_rss_processed_feed ON processed_entries(feed_id);
-      CREATE INDEX IF NOT EXISTS idx_rss_processed_priority ON processed_entries(priority);
-      CREATE INDEX IF NOT EXISTS idx_rss_processed_at ON processed_entries(processed_at);
-
-      CREATE TABLE IF NOT EXISTS feed_refresh_state (
-        feed_id INTEGER NOT NULL,
-        domain TEXT NOT NULL,
-        last_attempt_at INTEGER,
-        last_success_at INTEGER,
-        consecutive_failures INTEGER NOT NULL DEFAULT 0,
-        backoff_until INTEGER,
-        last_error TEXT,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY (feed_id, domain)
-      );
-
-      CREATE TABLE IF NOT EXISTS refresh_runs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        feed_id INTEGER NOT NULL,
-        feed_name TEXT NOT NULL,
-        domain TEXT NOT NULL,
-        ok INTEGER NOT NULL,
-        new_articles INTEGER NOT NULL,
-        updated_feeds INTEGER NOT NULL,
-        reason TEXT NOT NULL,
-        stdout TEXT NOT NULL,
-        stderr TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now', 'localtime'))
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_rss_refresh_runs_feed ON refresh_runs(feed_id);
-      CREATE INDEX IF NOT EXISTS idx_rss_refresh_runs_created ON refresh_runs(created_at);
-    `);
-  }
 }
 
 function emptyFeedRefreshStats(): FeedRefreshStats {
