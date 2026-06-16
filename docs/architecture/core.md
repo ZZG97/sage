@@ -10,6 +10,7 @@ Owned by Core:
 - Per-conversation message queueing.
 - Agent session creation, restore, and resume ID persistence.
 - Active run tracking and cancellation.
+- Provider stream idle timeout supervision.
 - Slash commands that affect runtime state.
 - Proactive agent execution for scheduler-triggered owner messages.
 - Binding response messages/thread IDs back to conversations.
@@ -35,8 +36,16 @@ Internal conversation IDs are immutable `conv_*` values. Feishu `first_message_i
 
 This avoids tying Sage's internal state to a Feishu message/thread ID or to a specific provider backend.
 
+## Provider Run Supervision
+
+`SageCore.runAgentTurn()` wraps each provider stream `next()` call through `src/services/agent-run-supervisor.ts`. The first version enforces an idle timeout between provider events, aborts the current run on timeout, records a clear failed result, and then releases `activeRuns`. The timeout is configured by `SAGE_AGENT_IDLE_TIMEOUT_MS`; the conservative default is 5 minutes.
+
+## Runtime Slash Commands
+
+`/restart` remains available from Feishu, but prod restart is owner-gated. When `OWNER_OPEN_ID` is configured, only that Feishu `open_id` may trigger restart. If it is missing, prod restart is disabled; `sage-dev` may still restart from a p2p dev chat for local iteration. No confirmation command is required.
+
 ## Current Gaps
 
-- No unified provider run supervisor for idle timeout, stalled streams, and structured error classification.
+- Provider run supervision is intentionally first-pass only; it does not yet provide circuit breaking, cooldowns, or structured provider error classification.
 - Some provider fallback metadata still uses loose event metadata.
 - Core remains large and should eventually be split into conversation routing, run execution, slash commands, and proactive execution.

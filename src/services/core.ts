@@ -8,6 +8,7 @@ import { appConfig } from '../config';
 import { MessageContext } from '../types';
 import { execSync } from 'child_process';
 import type { AssistantResponder, MessageGateway, ResponseAnchor, ResponseBinding } from './message-gateway';
+import { AgentRunIdleTimeoutError, getAgentIdleTimeoutMs, nextAgentStreamEvent } from './agent-run-supervisor';
 
 // ─── 常量 ───
 const DRAIN_TIMEOUT = 30_000; // drain 最多等 30s
@@ -291,15 +292,13 @@ export class SageCore {
     const UPDATE_INTERVAL = 1500;
     let runError: Error | undefined;
     let replyMessageId = startBinding.messageId;
+    const idleTimeoutMs = getAgentIdleTimeoutMs();
 
     try {
       const stream = this.agent.sendMessageStream(sessionId, prompt, abortController.signal);
-      const abortPromise = new Promise<{ done: true; value: undefined }>((resolve) => {
-        abortController.signal.addEventListener('abort', () => resolve({ done: true, value: undefined }), { once: true });
-      });
 
       while (true) {
-        const iterResult = await Promise.race([stream.next(), abortPromise]);
+        const iterResult = await nextAgentStreamEvent(stream, abortController, idleTimeoutMs);
         if (iterResult.done) {
           if (abortController.signal.aborted) {
             this.logger.info(`任务被用户中断: ${conversationId}`);
@@ -339,7 +338,14 @@ export class SageCore {
         }
       }
     } catch (error: any) {
-      this.logger.error('Agent 流式处理异常:', error);
+      if (error instanceof AgentRunIdleTimeoutError) {
+        this.logger.error(
+          `Agent 流式处理 idle timeout: conv=${conversationId}, session=${sessionId}, timeoutMs=${error.idleTimeoutMs}`,
+          error,
+        );
+      } else {
+        this.logger.error('Agent 流式处理异常:', error);
+      }
       runError = error instanceof Error ? error : new Error(String(error));
       resultText = resultText || `处理出错: ${runError.message}`;
     }
