@@ -32,11 +32,16 @@ interface RunAgentTurnResult {
   error?: Error;
 }
 
+interface SageCoreOptions {
+  restartExecutor?: (command: string) => void;
+}
+
 export class SageCore {
   private messageGateway: MessageGateway;
   private agent: AgentProvider;
   private historyStore: HistoryStore;
   private logger: Logger;
+  private restartExecutor: (command: string) => void;
   private isRunning: boolean = false;
   private isDraining: boolean = false;
 
@@ -54,11 +59,19 @@ export class SageCore {
   private processingConversations: Set<string> = new Set();
   private pendingMessages: Map<string, MessageContext[]> = new Map();
 
-  constructor(agent: AgentProvider, historyStore: HistoryStore, messageGateway: MessageGateway = new FeishuService(appConfig.feishu)) {
+  constructor(
+    agent: AgentProvider,
+    historyStore: HistoryStore,
+    messageGateway: MessageGateway = new FeishuService(appConfig.feishu),
+    options: SageCoreOptions = {},
+  ) {
     this.logger = new Logger('SageCore');
     this.agent = agent;
     this.historyStore = historyStore;
     this.messageGateway = messageGateway;
+    this.restartExecutor = options.restartExecutor ?? ((command: string) => {
+      execSync(command, { timeout: 10_000 });
+    });
 
     // 设置消息处理器（不再返回 string，SageCore 自行控制输出生命周期）
     this.messageGateway.setMessageHandler(this.handleIncomingMessage.bind(this));
@@ -388,6 +401,9 @@ export class SageCore {
     if (text.startsWith('/fallback')) return this.cmdFallback(text);
     if (text.startsWith('/provider')) return this.cmdProvider(text);
     if (text === '/restart') {
+      const processName = this.getProcessName();
+      const access = this.getRestartAccessDecision(ctx, processName);
+      if (!access.allowed) return access.message;
       this.cmdRestart(ctx);
       return 'async';
     }
@@ -444,7 +460,7 @@ export class SageCore {
   }
 
   private async cmdRestart(ctx: MessageContext): Promise<void> {
-    const processName = process.env.name || appConfig.processName || 'sage';
+    const processName = this.getProcessName();
     this.logger.info(`收到 /restart 命令，准备优雅重启 (process: ${processName})`);
 
     // 立即回复确认（这张回复独立，不进 activeRuns）
@@ -498,10 +514,46 @@ export class SageCore {
     this.logger.info(`/restart: drain 完成，执行 ${restartCommand}`);
     try {
       // 等待 drain 完成后再 restart，避免 pm2 kill 时 activeRuns 还未清空
-      execSync(restartCommand, { timeout: 10_000 });
+      this.restartExecutor(restartCommand);
     } catch {
       // restart 会杀自己，这里大概率不会执行到
     }
+  }
+
+  private getProcessName(): string {
+    return process.env.name || appConfig.processName || 'sage';
+  }
+
+  private getRestartAccessDecision(ctx: MessageContext, processName: string): { allowed: true } | { allowed: false; message: string } {
+    const ownerOpenId = process.env.OWNER_OPEN_ID?.trim();
+
+    if (ownerOpenId) {
+      if (ctx.openId === ownerOpenId) return { allowed: true };
+      this.logger.warn(`/restart 被拒绝: open=${ctx.openId}, owner configured`);
+      return {
+        allowed: false,
+        message: '⛔ /restart 已拒绝：只有 OWNER_OPEN_ID 配置的 owner 可以重启服务。',
+      };
+    }
+
+    if (this.isDevRestartProcess(processName)) {
+      if (ctx.chatType === 'p2p') return { allowed: true };
+      this.logger.warn(`/restart 被拒绝: OWNER_OPEN_ID 未配置，dev 仅允许私聊重启`);
+      return {
+        allowed: false,
+        message: '⛔ /restart 已拒绝：dev 未配置 OWNER_OPEN_ID 时，仅允许私聊触发重启。',
+      };
+    }
+
+    this.logger.warn('/restart 被拒绝: 生产环境未配置 OWNER_OPEN_ID');
+    return {
+      allowed: false,
+      message: '⛔ /restart 已禁用：生产环境必须配置 OWNER_OPEN_ID，且只能由 owner 执行。',
+    };
+  }
+
+  private isDevRestartProcess(processName: string): boolean {
+    return processName === 'sage-dev' || process.env.SAGE_INSTANCE === 'sage-dev';
   }
 
   private cmdHelp(): string {
@@ -514,7 +566,7 @@ export class SageCore {
       '/status - 查看服务状态',
       '/fallback [on|off] - 查看/切换自动降级开关',
       '/provider [name] - 查看/切换活跃 provider',
-      '/restart - 优雅重启服务（等待活跃任务完成后重启）',
+      '/restart - 优雅重启服务（需 OWNER_OPEN_ID owner；dev 未配置时仅私聊可用）',
       '/help - 显示此帮助信息',
       '',
       '使用说明:',
