@@ -113,14 +113,32 @@ class FakeAgentProvider implements AgentProvider {
 }
 
 const tempDirs: string[] = [];
+const originalRestartEnv = {
+  OWNER_OPEN_ID: process.env.OWNER_OPEN_ID,
+  name: process.env.name,
+  SAGE_INSTANCE: process.env.SAGE_INSTANCE,
+};
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+  restoreEnv('OWNER_OPEN_ID', originalRestartEnv.OWNER_OPEN_ID);
+  restoreEnv('name', originalRestartEnv.name);
+  restoreEnv('SAGE_INSTANCE', originalRestartEnv.SAGE_INSTANCE);
 });
 
-function createCoreHarness(): {
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}
+
+function createCoreHarness(options: {
+  restartExecutor?: (command: string) => void;
+} = {}): {
   core: SageCore;
   agent: FakeAgentProvider;
   historyStore: HistoryStore;
@@ -132,7 +150,7 @@ function createCoreHarness(): {
   const historyStore = new HistoryStore(path.join(dir, 'history.db'), 'test');
   const agent = new FakeAgentProvider();
   const gateway = new InMemoryMessageGateway();
-  const core = new SageCore(agent, historyStore, gateway);
+  const core = new SageCore(agent, historyStore, gateway, options);
   return {
     core,
     agent,
@@ -140,6 +158,21 @@ function createCoreHarness(): {
     gateway,
     destroy: () => historyStore.destroy(),
   };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error('Timed out waiting for condition');
+}
+
+function completedTexts(gateway: InMemoryMessageGateway): string[] {
+  return gateway.outboundMessages
+    .filter(message => message.type === 'response_complete')
+    .map(message => message.text);
 }
 
 function testMessage(overrides: Partial<MessageContext> = {}): MessageContext {
@@ -190,6 +223,125 @@ describe('SageCore message gateway boundary', () => {
         type: 'response_complete',
         text: 'Echo: hello Sage',
       });
+    } finally {
+      destroy();
+    }
+  });
+
+  it('does not apply restart ownership checks to ordinary messages', async () => {
+    process.env.OWNER_OPEN_ID = 'ou_owner';
+    const { agent, destroy, gateway } = createCoreHarness();
+
+    try {
+      await gateway.emitMessage(testMessage({ openId: 'ou_not_owner' }));
+
+      expect(agent.receivedMessages).toEqual([
+        { sessionId: 'fake-1', message: 'hello Sage' },
+      ]);
+    } finally {
+      destroy();
+    }
+  });
+
+  it('allows /restart for OWNER_OPEN_ID and executes the prod restart command', async () => {
+    process.env.OWNER_OPEN_ID = 'ou_owner';
+    process.env.name = 'sage';
+    delete process.env.SAGE_INSTANCE;
+    const restartCommands: string[] = [];
+    const { agent, destroy, gateway } = createCoreHarness({
+      restartExecutor: (command) => {
+        restartCommands.push(command);
+      },
+    });
+
+    try {
+      await gateway.emitMessage(testMessage({
+        text: '/restart',
+        openId: 'ou_owner',
+        messageId: 'om_restart_owner',
+      }));
+      await waitFor(() => restartCommands.length === 1);
+
+      expect(restartCommands).toEqual(['bun run prod:restart']);
+      expect(agent.receivedMessages).toHaveLength(0);
+      expect(completedTexts(gateway)).toContain('✅ 服务即将重启，请稍后发送消息继续。');
+    } finally {
+      destroy();
+    }
+  });
+
+  it('rejects /restart from non-owner when OWNER_OPEN_ID is configured', async () => {
+    process.env.OWNER_OPEN_ID = 'ou_owner';
+    process.env.name = 'sage';
+    const restartCommands: string[] = [];
+    const { agent, destroy, gateway } = createCoreHarness({
+      restartExecutor: (command) => {
+        restartCommands.push(command);
+      },
+    });
+
+    try {
+      await gateway.emitMessage(testMessage({
+        text: '/restart',
+        openId: 'ou_intruder',
+        messageId: 'om_restart_intruder',
+      }));
+
+      expect(restartCommands).toHaveLength(0);
+      expect(agent.receivedMessages).toHaveLength(0);
+      expect(completedTexts(gateway).at(-1)).toContain('只有 OWNER_OPEN_ID 配置的 owner 可以重启服务');
+    } finally {
+      destroy();
+    }
+  });
+
+  it('rejects /restart in prod when OWNER_OPEN_ID is not configured', async () => {
+    delete process.env.OWNER_OPEN_ID;
+    process.env.name = 'sage';
+    delete process.env.SAGE_INSTANCE;
+    const restartCommands: string[] = [];
+    const { agent, destroy, gateway } = createCoreHarness({
+      restartExecutor: (command) => {
+        restartCommands.push(command);
+      },
+    });
+
+    try {
+      await gateway.emitMessage(testMessage({
+        text: '/restart',
+        openId: 'ou_anyone',
+        messageId: 'om_restart_no_owner_prod',
+      }));
+
+      expect(restartCommands).toHaveLength(0);
+      expect(agent.receivedMessages).toHaveLength(0);
+      expect(completedTexts(gateway).at(-1)).toContain('生产环境必须配置 OWNER_OPEN_ID');
+    } finally {
+      destroy();
+    }
+  });
+
+  it('allows p2p /restart in dev when OWNER_OPEN_ID is not configured', async () => {
+    delete process.env.OWNER_OPEN_ID;
+    process.env.name = 'sage-dev';
+    const restartCommands: string[] = [];
+    const { agent, destroy, gateway } = createCoreHarness({
+      restartExecutor: (command) => {
+        restartCommands.push(command);
+      },
+    });
+
+    try {
+      await gateway.emitMessage(testMessage({
+        text: '/restart',
+        openId: 'ou_dev',
+        messageId: 'om_restart_no_owner_dev',
+        chatType: 'p2p',
+      }));
+      await waitFor(() => restartCommands.length === 1);
+
+      expect(restartCommands).toEqual(['bun run dev:restart']);
+      expect(agent.receivedMessages).toHaveLength(0);
     } finally {
       destroy();
     }
