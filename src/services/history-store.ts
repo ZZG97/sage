@@ -34,6 +34,7 @@ export interface ConversationSession {
   first_message_id: string | null;
   thread_id: string | null;
   agent_session_id: string | null;
+  agent_session_provider: string | null;
   resume_id: string | null;
   provider: string;
   open_id: string | null;
@@ -90,16 +91,17 @@ export class HistoryStore {
     chatId?: string;
     chatType?: string;
     agentSessionId?: string;
+    agentSessionProvider?: string;
   }): string {
     const now = new Date().toISOString();
     const id = this.newConversationId();
     this.db.run(
       `INSERT INTO sessions (
          id, env, provider, open_id, chat_id, chat_type,
-         first_message_id, thread_id, agent_session_id,
+         first_message_id, thread_id, agent_session_id, agent_session_provider,
          started_at, last_active_at
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id, this.env, provider,
         ctx?.openId ?? null,
@@ -108,6 +110,7 @@ export class HistoryStore {
         ctx?.firstMessageId ?? null,
         ctx?.threadId ?? null,
         ctx?.agentSessionId ?? null,
+        ctx?.agentSessionProvider ?? null,
         now, now,
       ],
     );
@@ -115,14 +118,15 @@ export class HistoryStore {
   }
 
   /** 确保 conversation 存在，不存在则按给定 id 创建。仅兼容旧调用路径。 */
-  ensureSession(sessionId: string, provider: string, ctx?: { openId?: string; chatId?: string; chatType?: string; agentSessionId?: string }): void {
+  ensureSession(sessionId: string, provider: string, ctx?: { openId?: string; chatId?: string; chatType?: string; agentSessionId?: string; agentSessionProvider?: string }): void {
     const now = new Date().toISOString();
     this.db.run(
-      `INSERT INTO sessions (id, env, provider, open_id, chat_id, chat_type, agent_session_id, started_at, last_active_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO sessions (id, env, provider, open_id, chat_id, chat_type, agent_session_id, agent_session_provider, started_at, last_active_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET last_active_at = ?,
-         agent_session_id = COALESCE(excluded.agent_session_id, sessions.agent_session_id)`,
-      [sessionId, this.env, provider, ctx?.openId ?? null, ctx?.chatId ?? null, ctx?.chatType ?? null, ctx?.agentSessionId ?? null, now, now, now]
+         agent_session_id = COALESCE(excluded.agent_session_id, sessions.agent_session_id),
+         agent_session_provider = COALESCE(excluded.agent_session_provider, sessions.agent_session_provider)`,
+      [sessionId, this.env, provider, ctx?.openId ?? null, ctx?.chatId ?? null, ctx?.chatType ?? null, ctx?.agentSessionId ?? null, ctx?.agentSessionProvider ?? null, now, now, now]
     );
   }
 
@@ -177,7 +181,7 @@ export class HistoryStore {
   }
 
   /** 写入用户消息 */
-  saveUserMessage(sessionId: string, provider: string, text: string, ctx?: { openId?: string; chatId?: string; chatType?: string; agentSessionId?: string }): void {
+  saveUserMessage(sessionId: string, provider: string, text: string, ctx?: { openId?: string; chatId?: string; chatType?: string; agentSessionId?: string; agentSessionProvider?: string }): void {
     this.ensureSession(sessionId, provider, ctx);
     const pos = this.nextPosition(sessionId);
     this.db.run(
@@ -231,11 +235,22 @@ export class HistoryStore {
     );
   }
 
-  /** 更新 conversation 的 agent_session_id */
-  updateAgentSessionId(conversationId: string, agentSessionId: string): void {
+  /** 更新 conversation 的 provider session id 和显式 owner。 */
+  updateAgentSessionId(conversationId: string, agentSessionId: string, agentSessionProvider?: string | null): void {
     this.db.run(
-      `UPDATE sessions SET agent_session_id = ? WHERE id = ?`,
-      [agentSessionId, conversationId]
+      `UPDATE sessions
+       SET agent_session_id = ?,
+           agent_session_provider = COALESCE(?, agent_session_provider)
+       WHERE id = ?`,
+      [agentSessionId, agentSessionProvider ?? null, conversationId]
+    );
+  }
+
+  /** 更新 conversation 的 provider session owner，不改变 session id。 */
+  updateAgentSessionProvider(conversationId: string, agentSessionProvider: string): void {
+    this.db.run(
+      `UPDATE sessions SET agent_session_provider = ? WHERE id = ?`,
+      [agentSessionProvider, conversationId]
     );
   }
 
@@ -243,6 +258,7 @@ export class HistoryStore {
   getActiveSessionsForRestore(maxAgeMs: number): Array<{
     id: string;             // conversationId
     agent_session_id: string; // provider session id (cc-xxx)
+    agent_session_provider: string | null;
     resume_id: string;      // SDK resume id
     provider: string;
     open_id: string;
@@ -250,7 +266,7 @@ export class HistoryStore {
   }> {
     const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
     return this.db.query(
-      `SELECT id, agent_session_id, resume_id, provider, open_id, last_active_at
+      `SELECT id, agent_session_id, agent_session_provider, resume_id, provider, open_id, last_active_at
        FROM sessions
        WHERE env = ? AND agent_session_id IS NOT NULL AND last_active_at > ?
        ORDER BY last_active_at DESC`
@@ -261,7 +277,7 @@ export class HistoryStore {
   getSession(conversationId: string): ConversationSession | null {
     return this.db.query(
       `SELECT id, first_message_id, thread_id, agent_session_id, resume_id,
-              provider, open_id, chat_id, chat_type, last_active_at
+              agent_session_provider, provider, open_id, chat_id, chat_type, last_active_at
        FROM sessions WHERE id = ? AND env = ?`
     ).get(conversationId, this.env) as ConversationSession | null ?? null;
   }
@@ -270,7 +286,7 @@ export class HistoryStore {
   getSessionByFirstMessageId(messageId: string): ConversationSession | null {
     return this.db.query(
       `SELECT id, first_message_id, thread_id, agent_session_id, resume_id,
-              provider, open_id, chat_id, chat_type, last_active_at
+              agent_session_provider, provider, open_id, chat_id, chat_type, last_active_at
        FROM sessions WHERE first_message_id = ? AND env = ?`
     ).get(messageId, this.env) as ConversationSession | null ?? null;
   }
@@ -279,7 +295,7 @@ export class HistoryStore {
   getSessionByThreadId(threadId: string): ConversationSession | null {
     return this.db.query(
       `SELECT id, first_message_id, thread_id, agent_session_id, resume_id,
-              provider, open_id, chat_id, chat_type, last_active_at
+              agent_session_provider, provider, open_id, chat_id, chat_type, last_active_at
        FROM sessions WHERE thread_id = ? AND env = ?`
     ).get(threadId, this.env) as ConversationSession | null ?? null;
   }
@@ -287,7 +303,7 @@ export class HistoryStore {
   /** 清除 conversation 的 agent 关联（/clear 用） */
   clearSessionAgent(conversationId: string): void {
     this.db.run(
-      `UPDATE sessions SET agent_session_id = NULL, resume_id = NULL WHERE id = ?`,
+      `UPDATE sessions SET agent_session_id = NULL, agent_session_provider = NULL, resume_id = NULL WHERE id = ?`,
       [conversationId]
     );
   }

@@ -25,6 +25,7 @@ export interface AgentEvent {
   toolDetail?: string;    // diff / command 等详情（JSON）
   ts: string;             // ISO 时间戳
   persist: boolean;       // 是否需要持久化到历史记录
+  metadata?: Record<string, unknown>; // runtime/session metadata，不直接渲染给用户
 }
 
 // Agent 回复

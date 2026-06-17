@@ -11,16 +11,21 @@ import type {
   StructuredAgentInput,
   StructuredAgentResponse,
 } from '../agent/types';
+import { FallbackAgentProvider } from '../agent/fallback-provider';
 import type { MessageContext } from '../types';
 import { HistoryStore } from './history-store';
 import { InMemoryMessageGateway } from './in-memory-message-gateway';
 import { SageCore } from './core';
 
 class FakeAgentProvider implements AgentProvider {
-  readonly name: string = 'fake-agent';
+  readonly name: string;
   private sessionCounter = 1;
   private sessions = new Map<string, AgentSession>();
   readonly receivedMessages: Array<{ sessionId: string; message: string }> = [];
+
+  constructor(name = 'fake-agent') {
+    this.name = name;
+  }
 
   async initialize(): Promise<void> {}
 
@@ -146,8 +151,8 @@ class NewSessionMetadataAgentProvider extends FakeAgentProvider {
       content: `Echo after fallback: ${message}`,
       ts: new Date().toISOString(),
       persist: true,
-      metadata: { newSessionId: 'fake-fallback-42' },
-    } as AgentEvent & { metadata: { newSessionId: string } };
+      metadata: { newSessionId: 'fake-fallback-42', newSessionProvider: this.name },
+    };
   }
 }
 
@@ -242,6 +247,7 @@ describe('SageCore message gateway boundary', () => {
       expect(session).not.toBeNull();
       expect(session?.thread_id).toBe('test_thread_1');
       expect(session?.agent_session_id).toBe('fake-1');
+      expect(session?.agent_session_provider).toBe('fake-agent');
       expect(session?.resume_id).toBe('resume-fake-1');
 
       const events = historyStore.getSessionEvents(session!.id);
@@ -316,6 +322,7 @@ describe('SageCore message gateway boundary', () => {
       const session = historyStore.getSessionByFirstMessageId('om_root_db');
       expect(session).not.toBeNull();
       expect(session?.agent_session_id).toBe('fake-1');
+      expect(session?.agent_session_provider).toBe('fake-agent');
 
       const nextAgent = new FakeAgentProvider();
       const nextGateway = new InMemoryMessageGateway();
@@ -430,6 +437,7 @@ describe('SageCore message gateway boundary', () => {
 
       const session = historyStore.getSessionByFirstMessageId('om_fallback_metadata');
       expect(session?.agent_session_id).toBe('fake-fallback-42');
+      expect(session?.agent_session_provider).toBe('new-session-agent');
       expect(session?.resume_id).toBe('resume-fake-fallback-42');
       expect(completedTexts(gateway).at(-1)).toBe('Echo after fallback: fallback turn');
 
@@ -443,6 +451,90 @@ describe('SageCore message gateway boundary', () => {
         sessionId: 'fake-fallback-42',
         message: 'after fallback',
       });
+    } finally {
+      historyStore.destroy();
+    }
+  });
+
+  it('persists provider session owner and restores through it instead of the active provider', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sage-core-test-'));
+    tempDirs.push(dir);
+    const historyStore = new HistoryStore(path.join(dir, 'history.db'), 'test');
+    const codex = new FakeAgentProvider('codex');
+    const claude = new FakeAgentProvider('claude-code');
+    const firstGateway = new InMemoryMessageGateway();
+    new SageCore(new FallbackAgentProvider([codex, claude]), historyStore, firstGateway);
+
+    try {
+      await firstGateway.emitMessage(testMessage({
+        text: 'first on codex',
+        messageId: 'om_owner_first',
+      }));
+
+      const session = historyStore.getSessionByFirstMessageId('om_owner_first');
+      expect(session?.agent_session_id).toBe('fake-1');
+      expect(session?.agent_session_provider).toBe('codex');
+
+      const nextCodex = new FakeAgentProvider('codex');
+      const nextClaude = new FakeAgentProvider('claude-code');
+      const fallback = new FallbackAgentProvider([nextCodex, nextClaude]);
+      fallback.switchActiveProvider('claude-code');
+      const nextGateway = new InMemoryMessageGateway();
+      new SageCore(fallback, historyStore, nextGateway);
+
+      await nextGateway.emitMessage(testMessage({
+        text: 'reply should stay on codex',
+        messageId: 'om_owner_reply',
+        rootId: 'om_owner_first',
+      }));
+
+      expect(nextCodex.receivedMessages).toEqual([
+        { sessionId: 'fake-1', message: 'reply should stay on codex' },
+      ]);
+      expect(nextClaude.receivedMessages).toHaveLength(0);
+    } finally {
+      historyStore.destroy();
+    }
+  });
+
+  it('creates a new visible session when fallback owner is missing and cannot be inferred', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sage-core-test-'));
+    tempDirs.push(dir);
+    const historyStore = new HistoryStore(path.join(dir, 'history.db'), 'test');
+    const conversationId = historyStore.createConversation('codex+claude-code', {
+      firstMessageId: 'om_missing_owner_root',
+      openId: 'ou_test',
+      chatId: 'oc_test',
+      chatType: 'p2p',
+    });
+    historyStore.updateAgentSessionId(conversationId, 'legacy-providerless-session');
+
+    const codex = new FakeAgentProvider('codex');
+    const claude = new FakeAgentProvider('claude-code');
+    const gateway = new InMemoryMessageGateway();
+    new SageCore(new FallbackAgentProvider([codex, claude]), historyStore, gateway);
+
+    try {
+      await gateway.emitMessage(testMessage({
+        text: 'reply after missing owner',
+        messageId: 'om_missing_owner_reply',
+        rootId: 'om_missing_owner_root',
+      }));
+
+      expect(codex.receivedMessages).toEqual([
+        { sessionId: 'fake-1', message: 'reply after missing owner' },
+      ]);
+      const session = historyStore.getSession(conversationId);
+      expect(session?.agent_session_id).toBe('fake-1');
+      expect(session?.agent_session_provider).toBe('codex');
+
+      const updates = gateway.outboundMessages.filter((message) => message.type === 'response_update');
+      expect(updates.at(-1)?.events).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: 'notice',
+          content: expect.stringContaining('历史会话缺少 provider owner'),
+        }),
+      ]));
     } finally {
       historyStore.destroy();
     }

@@ -44,9 +44,11 @@ Not owned by Core:
 
 ## Conversation Identity
 
-Internal conversation IDs are immutable `conv_*` values. `ConversationRouter` maps external `first_message_id`, `thread_id`, root message IDs, and response bindings to those internal IDs. Provider session IDs and SDK resume IDs are separate fields.
+Internal conversation IDs are immutable `conv_*` values. `ConversationRouter` maps external `first_message_id`, `thread_id`, root message IDs, and response bindings to those internal IDs. Provider session IDs, provider-session owners, and SDK resume IDs are separate fields.
 
 This avoids tying Sage's internal state to a Feishu message/thread ID or to a specific provider backend.
+
+For fallback provider sessions, `sessions.agent_session_provider` owns routing. If a legacy row lacks that owner and cannot be inferred from an active session or legacy prefix, Core creates a new provider session and emits a notice so the user can see that provider continuity may have changed.
 
 ## Provider Run Supervision
 
@@ -59,5 +61,4 @@ This avoids tying Sage's internal state to a Feishu message/thread ID or to a sp
 ## Current Gaps
 
 - Provider run supervision is intentionally first-pass only; it does not yet provide circuit breaking, cooldowns, or structured provider error classification.
-- Some provider fallback metadata still uses loose event metadata.
 - Core remains large and should eventually split proactive execution from the main message runtime.

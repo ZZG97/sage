@@ -51,6 +51,49 @@ describe('database migrations', () => {
     expect(appliedMigrationCount(db, 'scheduler')).toBe(2);
   });
 
+  it('adds and backfills history agent session provider owners', () => {
+    const db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        env TEXT NOT NULL DEFAULT 'production',
+        provider TEXT NOT NULL,
+        open_id TEXT,
+        chat_id TEXT,
+        chat_type TEXT,
+        started_at TEXT NOT NULL,
+        last_active_at TEXT NOT NULL,
+        summary TEXT,
+        keywords TEXT,
+        agent_session_id TEXT,
+        resume_id TEXT,
+        first_message_id TEXT,
+        thread_id TEXT
+      );
+
+      INSERT INTO sessions (
+        id, env, provider, started_at, last_active_at, agent_session_id
+      ) VALUES
+        ('conv_codex', 'test', 'codex+claude-code', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 'cdx-legacy'),
+        ('conv_unknown', 'test', 'codex+claude-code', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 'providerless-legacy');
+    `);
+
+    runDatabaseMigrations('history', db);
+
+    expect(columnNames(db, 'sessions')).toContain('agent_session_provider');
+    const rows = db.query(`
+      SELECT id, agent_session_provider
+      FROM sessions
+      ORDER BY id
+    `).all() as Array<{ id: string; agent_session_provider: string | null }>;
+
+    expect(rows).toEqual([
+      { id: 'conv_codex', agent_session_provider: 'codex' },
+      { id: 'conv_unknown', agent_session_provider: null },
+    ]);
+    expect(appliedMigrationCount(db, 'history')).toBe(3);
+  });
+
   it('keeps history data migrations explicit while centralizing the implementation', () => {
     const db = new Database(':memory:');
     runDatabaseMigrations('history', db);

@@ -81,6 +81,7 @@ const migrations: Record<DatabaseSchemaId, DatabaseMigration[]> = {
             summary TEXT,
             keywords TEXT,
             agent_session_id TEXT,
+            agent_session_provider TEXT,
             resume_id TEXT,
             first_message_id TEXT,
             thread_id TEXT
@@ -123,6 +124,7 @@ const migrations: Record<DatabaseSchemaId, DatabaseMigration[]> = {
       description: 'add provider and external message reference columns',
       up(db) {
         addColumnIfMissing(db, 'sessions', 'agent_session_id', 'agent_session_id TEXT');
+        addColumnIfMissing(db, 'sessions', 'agent_session_provider', 'agent_session_provider TEXT');
         addColumnIfMissing(db, 'sessions', 'resume_id', 'resume_id TEXT');
         addColumnIfMissing(db, 'sessions', 'first_message_id', 'first_message_id TEXT');
         addColumnIfMissing(db, 'sessions', 'thread_id', 'thread_id TEXT');
@@ -135,6 +137,29 @@ const migrations: Record<DatabaseSchemaId, DatabaseMigration[]> = {
           CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_thread
           ON sessions(env, thread_id)
           WHERE thread_id IS NOT NULL;
+        `);
+      },
+    },
+    {
+      id: '003_agent_session_provider',
+      description: 'persist provider owner for agent sessions',
+      up(db) {
+        addColumnIfMissing(db, 'sessions', 'agent_session_provider', 'agent_session_provider TEXT');
+        db.exec(`
+          UPDATE sessions
+          SET agent_session_provider = CASE
+            WHEN agent_session_id LIKE 'cdx-%' THEN 'codex'
+            WHEN agent_session_id LIKE 'ccm-%' THEN 'cc-minimax'
+            WHEN agent_session_id LIKE 'cc-%' THEN 'claude-code'
+            WHEN agent_session_id LIKE 'oc-%' THEN 'opencode'
+            ELSE agent_session_provider
+          END
+          WHERE agent_session_id IS NOT NULL
+            AND agent_session_provider IS NULL;
+
+          CREATE INDEX IF NOT EXISTS idx_sessions_agent_session_provider
+          ON sessions(env, agent_session_provider)
+          WHERE agent_session_provider IS NOT NULL;
         `);
       },
     },
@@ -611,7 +636,7 @@ function logPendingHistoryDataMigrations(db: Database, logger: Logger): void {
 function migrateLegacySessionIds(db: Database, logger: Logger): void {
   const legacyRows = db.query(
     `SELECT id, env, provider, open_id, chat_id, chat_type,
-            first_message_id, thread_id, agent_session_id, resume_id,
+            first_message_id, thread_id, agent_session_id, agent_session_provider, resume_id,
             started_at, last_active_at
      FROM sessions
      WHERE id NOT LIKE 'conv_%'`
@@ -625,6 +650,7 @@ function migrateLegacySessionIds(db: Database, logger: Logger): void {
     first_message_id: string | null;
     thread_id: string | null;
     agent_session_id: string | null;
+    agent_session_provider: string | null;
     resume_id: string | null;
     started_at: string;
     last_active_at: string;
@@ -637,13 +663,13 @@ function migrateLegacySessionIds(db: Database, logger: Logger): void {
   ).get() as { foreign_keys: number } | null;
 
   const findByFirstMessage = db.prepare(
-    `SELECT id, agent_session_id, resume_id
+    `SELECT id, agent_session_id, agent_session_provider, resume_id
      FROM sessions
      WHERE env = ? AND first_message_id = ? AND id != ?
      ORDER BY last_active_at DESC LIMIT 1`
   );
   const findByThread = db.prepare(
-    `SELECT id, agent_session_id, resume_id
+    `SELECT id, agent_session_id, agent_session_provider, resume_id
      FROM sessions
      WHERE env = ? AND thread_id = ? AND id != ?
      ORDER BY last_active_at DESC LIMIT 1`
@@ -667,6 +693,7 @@ function migrateLegacySessionIds(db: Database, logger: Logger): void {
         chat_id = COALESCE(chat_id, ?),
         chat_type = COALESCE(chat_type, ?),
         agent_session_id = COALESCE(agent_session_id, ?),
+        agent_session_provider = COALESCE(agent_session_provider, ?),
         resume_id = COALESCE(resume_id, ?),
         last_active_at = CASE WHEN last_active_at > ? THEN last_active_at ELSE ? END
     WHERE id = ?
@@ -681,9 +708,9 @@ function migrateLegacySessionIds(db: Database, logger: Logger): void {
       const firstMessageId = row.first_message_id ?? (row.id.startsWith('msg:') ? row.id.slice(4) : null);
       const threadId = row.thread_id ?? (row.id.startsWith('omt_') ? row.id : null);
       const existing = firstMessageId
-        ? findByFirstMessage.get(row.env, firstMessageId, row.id) as { id: string; agent_session_id: string | null; resume_id: string | null } | null
+        ? findByFirstMessage.get(row.env, firstMessageId, row.id) as { id: string; agent_session_id: string | null; agent_session_provider: string | null; resume_id: string | null } | null
         : threadId
-          ? findByThread.get(row.env, threadId, row.id) as { id: string; agent_session_id: string | null; resume_id: string | null } | null
+          ? findByThread.get(row.env, threadId, row.id) as { id: string; agent_session_id: string | null; agent_session_provider: string | null; resume_id: string | null } | null
           : null;
 
       if (existing) {
@@ -694,6 +721,7 @@ function migrateLegacySessionIds(db: Database, logger: Logger): void {
           row.chat_id,
           row.chat_type,
           row.agent_session_id,
+          row.agent_session_provider,
           row.resume_id,
           row.last_active_at,
           row.last_active_at,

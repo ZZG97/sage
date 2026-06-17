@@ -51,26 +51,6 @@ export interface MessageContext {
   attachments?: MessageAttachment[]; // 附件列表
 }
 
-// OpenCode 相关类型
-export interface OpenCodeSession {
-  id: string;
-  created_at?: string;
-  updated_at?: string;
-}
-
-export interface OpenCodePromptRequest {
-  parts: Array<{
-    type: 'text';
-    text: string;
-  }>;
-}
-
-export interface OpenCodePromptResponse {
-  data?: {
-    response?: string;
-  };
-}
-
 // 应用配置类型
 export interface AppConfig {
   feishu: {

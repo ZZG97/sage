@@ -27,6 +27,8 @@ Provider streams emit `AgentEvent` values. Core consumes those events without kn
 
 Sage stores local conversation state in SQLite and stores provider session/resume IDs separately. If provider-side session data disappears, Sage may still recover local conversation history, but true provider continuity can be lost.
 
+`sessions.agent_session_provider` is the durable owner for `agent_session_id`. `FallbackAgentProvider` uses this owner when restoring, updating, deleting, or sending through an existing session. Legacy session-id prefixes are retained only as a migration/backfill compatibility path; an unknown unowned session must not silently route to the active provider. When Sage cannot infer an owner, Core creates a new provider session and surfaces a user-visible notice that provider continuity may be lost.
+
 ## Rules
 
 - Provider adapters must not know Feishu or app-domain APIs.
@@ -38,5 +40,4 @@ Sage stores local conversation state in SQLite and stores provider session/resum
 
 - No circuit breaker or cooldown for repeatedly failing providers.
 - Core-level idle timeout exists for stalled streams, but provider-level circuit breaker and richer error classification are still missing.
-- Fallback behavior still depends partly on session ID prefixes.
 - Structured runner currently depends on provider support and should surface richer failure reasons for batch jobs.

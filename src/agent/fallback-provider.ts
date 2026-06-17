@@ -10,6 +10,17 @@ function isAbortError(error: any): boolean {
 /** 查询 conversationId 对应的最近对话历史（由外部注入，避免直接依赖 HistoryStore） */
 export type RecentHistoryFn = (conversationId: string, maxTurns: number) => Array<{ role: string; content: string }>;
 
+export class UnknownProviderSessionOwnerError extends Error {
+  readonly code = 'UNKNOWN_PROVIDER_SESSION_OWNER';
+
+  constructor(sessionId: string, availableProviders: string[]) {
+    super(
+      `Unknown provider owner for session ${sessionId}; available providers: ${availableProviders.join(', ')}`
+    );
+    this.name = 'UnknownProviderSessionOwnerError';
+  }
+}
+
 export class FallbackAgentProvider implements AgentProvider {
   readonly name: string;
 
@@ -24,6 +35,7 @@ export class FallbackAgentProvider implements AgentProvider {
 
   /** agent_session_id → conversationId 映射，由 SageCore 注册 */
   private sessionToConversation: Map<string, string> = new Map();
+  private sessionOwners: Map<string, string> = new Map();
   private sessionContexts: Map<string, AgentSessionContext> = new Map();
   private getRecentHistory?: RecentHistoryFn;
 
@@ -73,6 +85,21 @@ export class FallbackAgentProvider implements AgentProvider {
     this.sessionToConversation.set(sessionId, conversationId);
   }
 
+  /** 注册 provider session 的真实 owner。owner 来自持久化 storage 或新建 session 返回值。 */
+  registerSessionOwner(sessionId: string, providerName: string): boolean {
+    if (!this.providers.has(providerName)) {
+      this.logger.warn(`注册 session owner 失败，未知 provider: session=${sessionId}, provider=${providerName}`);
+      return false;
+    }
+    this.sessionOwners.set(sessionId, providerName);
+    return true;
+  }
+
+  /** 返回已知 owner；必要时只做 legacy/内存推断，不会回落到 active provider。 */
+  getSessionOwner(sessionId: string): string | null {
+    return this.resolveProviderName(sessionId);
+  }
+
   async initialize(): Promise<void> {
     // 活跃 provider 必须初始化成功，其余失败不阻塞
     const active = this.providers.get(this._activeProviderName)!;
@@ -103,6 +130,7 @@ export class FallbackAgentProvider implements AgentProvider {
     const active = this.providers.get(this._activeProviderName)!;
     try {
       const session = await active.createSession(context);
+      this.rememberSessionOwner(session, active.name);
       if (context) this.sessionContexts.set(session.id, context);
       return session;
     } catch (err) {
@@ -114,6 +142,7 @@ export class FallbackAgentProvider implements AgentProvider {
           const provider = this.providers.get(name)!;
           this.logger.warn(`${this._activeProviderName} createSession 失败，降级到 ${name}:`, err);
           const session = await provider.createSession(context);
+          this.rememberSessionOwner(session, name);
           if (context) this.sessionContexts.set(session.id, context);
           return session;
         } catch { /* try next */ }
@@ -165,6 +194,7 @@ export class FallbackAgentProvider implements AgentProvider {
 
           const sessionContext = this.sessionContexts.get(sessionId);
           const newSession = await fallback.createSession(sessionContext);
+          this.rememberSessionOwner(newSession, name);
           if (sessionContext) this.sessionContexts.set(newSession.id, sessionContext);
           this.logger.warn(`创建降级会话: oldSession=${sessionId}, newSession=${newSession.id}, provider=${name}`);
 
@@ -179,7 +209,11 @@ export class FallbackAgentProvider implements AgentProvider {
 
           for await (const event of fallback.sendMessageStream(newSession.id, enrichedMessage, signal)) {
             if (event.type === 'result') {
-              (event as any).metadata = { newSessionId: newSession.id };
+              event.metadata = {
+                ...(event.metadata ?? {}),
+                newSessionId: newSession.id,
+                newSessionProvider: name,
+              };
             }
             yield event;
           }
@@ -206,13 +240,16 @@ export class FallbackAgentProvider implements AgentProvider {
 
   async restoreSession(sessionId: string, resumeId?: string, context?: AgentSessionContext): Promise<AgentSession> {
     const session = await this.routeProvider(sessionId).restoreSession(sessionId, resumeId, context);
+    this.rememberSessionOwner(session, session.provider);
     if (context) this.sessionContexts.set(session.id, context);
     return session;
   }
 
   async deleteSession(sessionId: string): Promise<void> {
+    const provider = this.routeProvider(sessionId);
     this.sessionContexts.delete(sessionId);
-    return this.routeProvider(sessionId).deleteSession(sessionId);
+    this.sessionOwners.delete(sessionId);
+    return provider.deleteSession(sessionId);
   }
 
   getActiveSessions(): AgentSession[] {
@@ -232,10 +269,14 @@ export class FallbackAgentProvider implements AgentProvider {
     for (const sessionId of this.sessionContexts.keys()) {
       if (!activeSessionIds.has(sessionId)) this.sessionContexts.delete(sessionId);
     }
+    for (const sessionId of this.sessionOwners.keys()) {
+      if (!activeSessionIds.has(sessionId)) this.sessionOwners.delete(sessionId);
+    }
     return total;
   }
 
   async destroy(): Promise<void> {
+    this.sessionOwners.clear();
     this.sessionContexts.clear();
     for (const provider of this.providers.values()) {
       await provider.destroy();
@@ -272,25 +313,45 @@ export class FallbackAgentProvider implements AgentProvider {
     return `[上下文恢复] 由于服务切换，以下是之前的对话记录供参考：\n${historyText}\n---\n${message}`;
   }
 
-  /** 根据 sessionId 前缀路由到对应 provider */
   private routeProvider(sessionId: string): AgentProvider {
-    // 按前缀匹配
+    const providerName = this.resolveProviderName(sessionId);
+    if (!providerName) {
+      throw new UnknownProviderSessionOwnerError(sessionId, this.providerOrder);
+    }
+    return this.providers.get(providerName)!;
+  }
+
+  private resolveProviderName(sessionId: string): string | null {
+    const registeredOwner = this.sessionOwners.get(sessionId);
+    if (registeredOwner && this.providers.has(registeredOwner)) {
+      return registeredOwner;
+    }
+    if (registeredOwner) {
+      this.logger.warn(`清理失效 session owner: session=${sessionId}, provider=${registeredOwner}`);
+      this.sessionOwners.delete(sessionId);
+    }
+
+    // 进程内已有 session 可以直接定位 owner。
     for (const [name, provider] of this.providers) {
-      const prefix = this.getProviderPrefix(name);
-      if (prefix && sessionId.startsWith(prefix)) {
-        return provider;
-      }
-    }
-
-    // 前缀不匹配时，按实际持有 session 判断
-    for (const [, provider] of this.providers) {
       if (provider.getActiveSessions().some(s => s.id === sessionId)) {
-        return provider;
+        this.sessionOwners.set(sessionId, name);
+        return name;
       }
     }
 
-    // 默认活跃 provider
-    return this.providers.get(this._activeProviderName)!;
+    const legacyProvider = this.getLegacyProviderName(sessionId);
+    if (legacyProvider) {
+      this.logger.warn(`通过 legacy session 前缀推断 provider owner: session=${sessionId}, provider=${legacyProvider}`);
+      this.sessionOwners.set(sessionId, legacyProvider);
+      return legacyProvider;
+    }
+
+    return null;
+  }
+
+  private rememberSessionOwner(session: AgentSession, fallbackProviderName: string): void {
+    const providerName = this.providers.has(session.provider) ? session.provider : fallbackProviderName;
+    this.sessionOwners.set(session.id, providerName);
   }
 
   /** 判断是否应该降级（反向逻辑：只有明确的业务错误才不降级） */
@@ -299,6 +360,14 @@ export class FallbackAgentProvider implements AgentProvider {
     if (msg.includes('content policy') || msg.includes('content_policy')) return false;
     if (msg.includes('safety') || msg.includes('moderation')) return false;
     return true;
+  }
+
+  private getLegacyProviderName(sessionId: string): string | null {
+    for (const name of this.providerOrder) {
+      const prefix = this.getProviderPrefix(name);
+      if (prefix && sessionId.startsWith(prefix)) return name;
+    }
+    return null;
   }
 
   private getProviderPrefix(name: string): string {

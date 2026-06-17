@@ -1,7 +1,7 @@
 import { FeishuService } from './feishu';
 import { AgentProvider } from '../agent';
 import { FallbackAgentProvider } from '../agent/fallback-provider';
-import type { HistoryStore } from './history-store';
+import type { ConversationSession, HistoryStore } from './history-store';
 import { Logger, AppError, patchRequestContext, sanitizeLogValue } from '../utils';
 import { appConfig } from '../config';
 import { MessageContext } from '../types';
@@ -32,6 +32,13 @@ interface RunAgentForOwnerOptions {
 
 interface SageCoreOptions {
   restartExecutor?: (command: string) => void;
+}
+
+interface AgentSessionResolution {
+  sessionId: string;
+  providerName: string;
+  isNew: boolean;
+  notice?: string;
 }
 
 export class SageCore {
@@ -177,12 +184,12 @@ export class SageCore {
       let processedMessage = this.preprocessMessage(ctx.text);
 
       // 获取或创建 Thread 对应的会话
-      const { sessionId, isNew } = await this.getOrCreateAgentSession(conversationId);
+      const { sessionId, providerName, isNew, notice } = await this.getOrCreateAgentSession(conversationId);
       patchRequestContext({
         conversationId,
         messageId: ctx.messageId,
         sessionId,
-        provider: this.getProviderNameForSession(sessionId),
+        provider: providerName,
       });
 
       // 仅在新会话首条消息时注入主动消息上下文（避免 thread 内每条消息都重复注入）
@@ -201,11 +208,12 @@ export class SageCore {
       }
 
       // 记录用户消息
-      this.historyStore.saveUserMessage(conversationId, this.agent.name, processedMessage, {
+      this.historyStore.saveUserMessage(conversationId, providerName, processedMessage, {
         openId: ctx.openId,
         chatId: ctx.chatId,
         chatType: ctx.chatType,
         agentSessionId: sessionId,
+        agentSessionProvider: providerName,
       });
 
       await this.runAgentTurn({
@@ -214,6 +222,7 @@ export class SageCore {
         sessionId,
         sourceMessageIds,
         anchor: { kind: 'reply', parentMessageId: ctx.messageId },
+        notice,
       });
 
     } catch (error) {
@@ -238,8 +247,9 @@ export class SageCore {
     sessionId: string;
     sourceMessageIds?: string[];
     anchor: ResponseAnchor;
+    notice?: string;
   }): Promise<RunAgentTurnResult> {
-    const { prompt, conversationId, sessionId, sourceMessageIds, anchor } = opts;
+    const { prompt, conversationId, sessionId, sourceMessageIds, anchor, notice } = opts;
     if (anchor.kind === 'reply') {
       this.conversationRouter.rememberMessageConversation(anchor.parentMessageId, conversationId);
     }
@@ -250,6 +260,12 @@ export class SageCore {
       sessionId,
       sourceMessageIds,
       anchor,
+      initialEvents: notice ? [{
+        type: 'notice',
+        content: notice,
+        ts: new Date().toISOString(),
+        persist: false,
+      }] : undefined,
       agent: this.agent,
       createResponder: (anchor) => this.messageGateway.createResponder(anchor),
       activeRuns: {
@@ -275,8 +291,9 @@ export class SageCore {
         }
         this.recordProactiveMessageAfterSend(rootMessageId, `[主动任务] ${prompt}`, openId);
       },
-      saveAgentSessionId: (conversationId, sessionId) => {
-        this.historyStore.updateAgentSessionId(conversationId, sessionId);
+      saveAgentSessionId: (conversationId, sessionId, providerName) => {
+        this.historyStore.updateAgentSessionId(conversationId, sessionId, providerName);
+        this.registerFallbackSessionOwner(sessionId, providerName);
       },
       rememberRestoredSession: (sessionId) => {
         this.restoredSessions.add(sessionId);
@@ -519,38 +536,90 @@ export class SageCore {
     return topic.length > 80 ? `${topic.slice(0, 77)}...` : topic;
   }
 
-  private async getOrCreateAgentSession(conversationId: string): Promise<{ sessionId: string; isNew: boolean }> {
+  private async getOrCreateAgentSession(conversationId: string): Promise<AgentSessionResolution> {
     const row = this.historyStore.getSession(conversationId);
     const sessionContext = this.buildAgentSessionContext(conversationId);
 
     if (row?.agent_session_id) {
+      const owner = this.resolveExistingAgentSessionOwner(row);
+      if (!owner && this.agent instanceof FallbackAgentProvider) {
+        this.logger.warn(`历史 agent session 缺少 provider owner，改为创建新会话: conversation=${conversationId}, session=${row.agent_session_id}`);
+        const created = await this.createNewAgentSession(conversationId);
+        return {
+          ...created,
+          isNew: true,
+          notice: `⚠️ 历史会话缺少 provider owner，已创建新的 ${created.providerName} 会话；上一轮 provider 上下文可能无法延续。`,
+        };
+      }
+
       if (!this.restoredSessions.has(row.agent_session_id)) {
         try {
-          await this.agent.restoreSession(row.agent_session_id, row.resume_id || undefined, sessionContext);
+          const restored = await this.agent.restoreSession(row.agent_session_id, row.resume_id || undefined, sessionContext);
+          const providerName = this.persistAgentSessionOwner(
+            conversationId,
+            restored.id,
+            restored.provider || owner || this.getProviderNameForSession(row.agent_session_id),
+          );
           this.restoredSessions.add(row.agent_session_id);
-          this.logger.info(`懒恢复会话: ${conversationId} -> ${row.agent_session_id}`);
+          this.logger.info(`懒恢复会话: ${conversationId} -> ${row.agent_session_id} (${providerName})`);
+          return { sessionId: row.agent_session_id, providerName, isNew: false };
         } catch (err) {
           this.logger.warn(`恢复会话失败，将创建新会话: ${row.agent_session_id}`, err);
-          const sessionId = await this.createNewAgentSession(conversationId);
-          return { sessionId, isNew: true };
+          const created = await this.createNewAgentSession(conversationId);
+          return {
+            ...created,
+            isNew: true,
+            notice: `⚠️ 历史 provider 会话恢复失败，已创建新的 ${created.providerName} 会话；上一轮 provider 上下文可能无法延续。`,
+          };
         }
       } else {
         await this.agent.updateSessionContext?.(row.agent_session_id, sessionContext);
-        this.logger.info(`复用 conversation 会话: ${conversationId} -> ${row.agent_session_id}`);
+        const providerName = owner ?? this.getProviderNameForSession(row.agent_session_id);
+        this.logger.info(`复用 conversation 会话: ${conversationId} -> ${row.agent_session_id} (${providerName})`);
+        return { sessionId: row.agent_session_id, providerName, isNew: false };
       }
-      return { sessionId: row.agent_session_id, isNew: false };
     }
 
-    const sessionId = await this.createNewAgentSession(conversationId);
-    return { sessionId, isNew: true };
+    const created = await this.createNewAgentSession(conversationId);
+    return { ...created, isNew: true };
   }
 
-  private async createNewAgentSession(conversationId: string): Promise<string> {
+  private async createNewAgentSession(conversationId: string): Promise<{ sessionId: string; providerName: string }> {
     const session = await this.agent.createSession(this.buildAgentSessionContext(conversationId));
+    const providerName = session.provider || this.getProviderNameForSession(session.id);
     this.restoredSessions.add(session.id);
-    this.historyStore.updateAgentSessionId(conversationId, session.id);
-    this.logger.info(`创建新 agent 会话: ${conversationId} -> ${session.id} (provider: ${this.agent.name})`);
-    return session.id;
+    this.persistAgentSessionOwner(conversationId, session.id, providerName);
+    this.logger.info(`创建新 agent 会话: ${conversationId} -> ${session.id} (provider: ${providerName})`);
+    return { sessionId: session.id, providerName };
+  }
+
+  private resolveExistingAgentSessionOwner(row: ConversationSession): string | null {
+    if (!row.agent_session_id) return null;
+    if (!(this.agent instanceof FallbackAgentProvider)) {
+      const providerName = row.agent_session_provider || this.agent.name;
+      this.historyStore.updateAgentSessionProvider(row.id, providerName);
+      return providerName;
+    }
+
+    if (row.agent_session_provider) {
+      if (this.agent.registerSessionOwner(row.agent_session_id, row.agent_session_provider)) {
+        return row.agent_session_provider;
+      }
+      return null;
+    }
+
+    const inferredProvider = this.agent.getSessionOwner(row.agent_session_id);
+    if (!inferredProvider) return null;
+
+    this.historyStore.updateAgentSessionProvider(row.id, inferredProvider);
+    return inferredProvider;
+  }
+
+  private persistAgentSessionOwner(conversationId: string, sessionId: string, providerName: string): string {
+    const normalizedProvider = providerName || this.getProviderNameForSession(sessionId);
+    this.historyStore.updateAgentSessionId(conversationId, sessionId, normalizedProvider);
+    this.registerFallbackSessionOwner(sessionId, normalizedProvider);
+    return normalizedProvider;
   }
 
   private buildAgentSessionContext(conversationId: string): {
@@ -572,11 +641,7 @@ export class SageCore {
 
   private getProviderNameForSession(sessionId: string): string {
     if (!(this.agent instanceof FallbackAgentProvider)) return this.agent.name;
-    if (sessionId.startsWith('cdx-')) return 'codex';
-    if (sessionId.startsWith('ccm-')) return 'cc-minimax';
-    if (sessionId.startsWith('cc-')) return 'claude-code';
-    if (sessionId.startsWith('oc-')) return 'opencode';
-    return this.agent.activeProviderName;
+    return this.agent.getSessionOwner(sessionId) ?? 'unknown';
   }
 
   private preprocessMessage(message: string): string {
@@ -781,20 +846,22 @@ export class SageCore {
       chatType: 'p2p',
     });
     const session = await this.agent.createSession(this.buildAgentSessionContext(conversationId));
+    const providerName = session.provider || this.getProviderNameForSession(session.id);
     this.restoredSessions.add(session.id);
-    this.historyStore.updateAgentSessionId(conversationId, session.id);
+    this.persistAgentSessionOwner(conversationId, session.id, providerName);
     this.registerFallbackSessionConversation(session.id, conversationId);
     patchRequestContext({
       conversationId,
       sessionId: session.id,
-      provider: this.getProviderNameForSession(session.id),
+      provider: providerName,
     });
 
-    this.historyStore.saveUserMessage(conversationId, this.agent.name, prompt, {
+    this.historyStore.saveUserMessage(conversationId, providerName, prompt, {
       openId,
       chatId: '',
       chatType: 'p2p',
       agentSessionId: session.id,
+      agentSessionProvider: providerName,
     });
 
     const result = await this.runAgentTurn({
@@ -824,20 +891,21 @@ export class SageCore {
       return false;
     }
 
-    const { sessionId } = await this.getOrCreateAgentSession(conversationId);
+    const { sessionId, providerName, notice } = await this.getOrCreateAgentSession(conversationId);
     this.registerFallbackSessionConversation(sessionId, conversationId);
     patchRequestContext({
       conversationId,
       sessionId,
-      provider: this.getProviderNameForSession(sessionId),
+      provider: providerName,
     });
 
     const scheduledPrompt = `[定时任务触发]\n\n${prompt}`;
-    this.historyStore.saveUserMessage(conversationId, this.agent.name, scheduledPrompt, {
+    this.historyStore.saveUserMessage(conversationId, providerName, scheduledPrompt, {
       openId: row.open_id ?? undefined,
       chatId: row.chat_id ?? undefined,
       chatType: row.chat_type ?? undefined,
       agentSessionId: sessionId,
+      agentSessionProvider: providerName,
     });
 
     const result = await this.runAgentTurn({
@@ -846,6 +914,7 @@ export class SageCore {
       sessionId,
       sourceMessageIds: [],
       anchor: { kind: 'reply', parentMessageId: row.first_message_id },
+      notice,
     });
 
     if (result?.replyMessageId) {
@@ -861,6 +930,12 @@ export class SageCore {
   private registerFallbackSessionConversation(sessionId: string, conversationId: string): void {
     if (this.agent instanceof FallbackAgentProvider) {
       this.agent.registerSessionConversation(sessionId, conversationId);
+    }
+  }
+
+  private registerFallbackSessionOwner(sessionId: string, providerName: string): void {
+    if (this.agent instanceof FallbackAgentProvider) {
+      this.agent.registerSessionOwner(sessionId, providerName);
     }
   }
 }

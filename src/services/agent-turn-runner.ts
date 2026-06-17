@@ -39,6 +39,7 @@ export interface ExecuteAgentTurnOptions {
   sessionId: string;
   sourceMessageIds?: string[];
   anchor: ResponseAnchor;
+  initialEvents?: AgentEvent[];
   agent: Pick<AgentProvider, 'name' | 'sendMessageStream' | 'updateSessionContext' | 'getResumeId'>;
   createResponder(anchor: ResponseAnchor): AssistantResponder;
   activeRuns: ActiveRunRegistry;
@@ -52,7 +53,7 @@ export interface ExecuteAgentTurnOptions {
     prompt: string;
     openId: string;
   }): void;
-  saveAgentSessionId(conversationId: string, sessionId: string): void;
+  saveAgentSessionId(conversationId: string, sessionId: string, providerName: string): void;
   rememberRestoredSession(sessionId: string): void;
   saveResumeId(conversationId: string, resumeId: string): void;
   saveAgentEvents(conversationId: string, provider: string, events: AgentEvent[]): void;
@@ -103,12 +104,22 @@ export async function executeAgentTurn(opts: ExecuteAgentTurnOptions): Promise<R
   const displayEvents: AgentEvent[] = [];
   let resultText = '';
   let newSessionId: string | undefined;
+  let effectiveProviderName = opts.getProviderNameForSession(sessionId);
   let lastUpdateTime = 0;
   let runError: Error | undefined;
   let replyMessageId = startBinding.messageId;
   const idleTimeoutMs = getAgentIdleTimeoutMs();
 
   try {
+    if (opts.initialEvents?.length) {
+      allEvents.push(...opts.initialEvents);
+      displayEvents.push(...opts.initialEvents);
+      const binding = await responder.update({ events: displayEvents });
+      opts.bindResponse(binding, conversationId);
+      if (binding?.messageId) replyMessageId = binding.messageId;
+      lastUpdateTime = Date.now();
+    }
+
     const stream = opts.agent.sendMessageStream(sessionId, prompt, abortController.signal);
 
     while (true) {
@@ -129,10 +140,12 @@ export async function executeAgentTurn(opts: ExecuteAgentTurnOptions): Promise<R
       const fallbackSessionId = getFallbackSessionId(event);
       if (fallbackSessionId) {
         newSessionId = fallbackSessionId;
+        effectiveProviderName = getFallbackSessionProvider(event)
+          ?? opts.getProviderNameForSession(fallbackSessionId);
         opts.patchRequestContext({
           conversationId,
           sessionId: fallbackSessionId,
-          provider: opts.getProviderNameForSession(fallbackSessionId),
+          provider: effectiveProviderName,
         });
       }
 
@@ -166,9 +179,9 @@ export async function executeAgentTurn(opts: ExecuteAgentTurnOptions): Promise<R
 
   try {
     if (newSessionId) {
-      opts.saveAgentSessionId(conversationId, newSessionId);
+      opts.saveAgentSessionId(conversationId, newSessionId, effectiveProviderName);
       opts.rememberRestoredSession(newSessionId);
-      opts.logger.info(`Fallback 更新会话: ${conversationId} -> ${newSessionId}`);
+      opts.logger.info(`Fallback 更新会话: ${conversationId} -> ${newSessionId} (${effectiveProviderName})`);
     }
 
     const effectiveSessionId = newSessionId ?? sessionId;
@@ -177,7 +190,7 @@ export async function executeAgentTurn(opts: ExecuteAgentTurnOptions): Promise<R
       opts.saveResumeId(conversationId, resumeId);
     }
 
-    opts.saveAgentEvents(conversationId, opts.agent.name, allEvents);
+    opts.saveAgentEvents(conversationId, effectiveProviderName, allEvents);
 
     const finalBinding = await responder.complete({ events: displayEvents, text: resultText });
     opts.bindResponse(finalBinding, conversationId);
@@ -214,5 +227,11 @@ function shouldUpdateResponse(event: AgentEvent): boolean {
 }
 
 function getFallbackSessionId(event: AgentEvent): string | undefined {
-  return (event as AgentEvent & { metadata?: { newSessionId?: string } }).metadata?.newSessionId;
+  const value = event.metadata?.newSessionId;
+  return typeof value === 'string' ? value : undefined;
+}
+
+function getFallbackSessionProvider(event: AgentEvent): string | undefined {
+  const value = event.metadata?.newSessionProvider;
+  return typeof value === 'string' ? value : undefined;
 }

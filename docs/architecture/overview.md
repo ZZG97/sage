@@ -53,7 +53,7 @@ bunqueue scheduler
 
 - Core no longer depends directly on Feishu card JSON; it speaks semantic response lifecycle through `AssistantResponder`.
 - Internal conversation IDs are stable `conv_*` IDs; Feishu message/thread IDs are external lookup fields.
-- Provider abstraction supports multiple backends and lazy session restore.
+- Provider abstraction supports multiple backends, lazy session restore, and durable provider-session ownership.
 - Scheduler uses persistent dynamic tasks and records runs into Operations.
 - Apps are mounted under `/apps/{name}` and generally own their own service/repository boundary.
 - SQLite schemas and structural migrations are centralized in `src/shared/db-migrations.ts`.
@@ -62,5 +62,5 @@ bunqueue scheduler
 ## Current Pressure Points
 
 - `SageCore`, `FeishuService`, and `TaskScheduler` are large stateful modules and should be split only along established ownership boundaries.
-- Provider reliability needs stronger timeout, circuit breaker, and explicit provider-session ownership.
+- Provider reliability needs stronger timeout, circuit breaker, and richer provider error classification.
 - Storage backup and restore conventions still need a dedicated operator runbook.
