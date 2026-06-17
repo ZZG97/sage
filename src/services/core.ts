@@ -1,15 +1,14 @@
 import { FeishuService } from './feishu';
 import { AgentProvider } from '../agent';
 import { FallbackAgentProvider } from '../agent/fallback-provider';
-import type { AgentEvent } from '../agent/types';
 import type { HistoryStore } from './history-store';
 import { Logger, AppError, patchRequestContext, sanitizeLogValue } from '../utils';
 import { appConfig } from '../config';
 import { MessageContext } from '../types';
 import { execSync } from 'child_process';
-import type { AssistantResponder, MessageGateway, ResponseAnchor } from './message-gateway';
-import { AgentRunIdleTimeoutError, getAgentIdleTimeoutMs, nextAgentStreamEvent } from './agent-run-supervisor';
+import type { MessageGateway, ResponseAnchor } from './message-gateway';
 import { ConversationRouter } from './conversation-router';
+import { executeAgentTurn, type ActiveRun, type RunAgentTurnResult } from './agent-turn-runner';
 import {
   buildRestartStartText,
   getRestartExecutorCommand,
@@ -27,22 +26,8 @@ const DRAIN_TIMEOUT = 30_000; // drain 最多等 30s
 const MAX_SESSION_AGE = 24 * 60 * 60 * 1000; // 会话最大存活时间 24h
 const DEFAULT_PROACTIVE_TOPIC = 'Sage 主动任务';
 
-interface ActiveRun {
-  conversationId: string;
-  sourceMessageIds: Set<string>;
-  abortController: AbortController;
-  responder: AssistantResponder;
-  cancelReason?: string;
-}
-
 interface RunAgentForOwnerOptions {
   reuseConversationId?: string;
-}
-
-interface RunAgentTurnResult {
-  replyMessageId?: string;
-  status: 'success' | 'failed' | 'cancelled';
-  error?: Error;
 }
 
 interface SageCoreOptions {
@@ -259,151 +244,51 @@ export class SageCore {
       this.conversationRouter.rememberMessageConversation(anchor.parentMessageId, conversationId);
     }
 
-    const responder = this.messageGateway.createResponder(anchor);
-    const startBinding = await responder.start();
-    this.conversationRouter.bindResponseToConversation(startBinding, conversationId);
-
-    if (anchor.kind === 'proactive') {
-      if (!startBinding.rootMessageId) {
-        const error = new Error('发送主动任务根消息失败，无 messageId');
-        this.logger.error(error.message);
-        return { status: 'failed', error };
-      }
-
-      const bound = this.historyStore.setConversationFirstMessageId(conversationId, startBinding.rootMessageId);
-      if (!bound) {
-        this.logger.warn(`主动任务根消息绑定 conversation first_message_id 失败: conversation=${conversationId}, messageId=${startBinding.rootMessageId}`);
-      }
-      this.recordProactiveMessageAfterSend(startBinding.rootMessageId, `[主动任务] ${prompt}`, anchor.openId);
-    }
-
-    if (!startBinding.messageId) {
-      const error = new Error('发送初始回复失败，无 messageId');
-      this.logger.error(error.message);
-      return { status: 'failed', error };
-    }
-
-    if (startBinding.threadId) {
-      await this.agent.updateSessionContext?.(sessionId, this.buildAgentSessionContext(conversationId));
-    }
-
-    const abortController = new AbortController();
-    const activeRun: ActiveRun = {
+    return executeAgentTurn({
+      prompt,
       conversationId,
-      sourceMessageIds: new Set(sourceMessageIds ?? (anchor.kind === 'reply' ? [anchor.parentMessageId] : [])),
-      abortController,
-      responder,
-    };
-    this.activeRuns.set(conversationId, activeRun);
-
-    const allEvents: AgentEvent[] = [];
-    const displayEvents: AgentEvent[] = [];
-    let resultText = '';
-    let newSessionId: string | undefined;
-    let lastUpdateTime = 0;
-    const UPDATE_INTERVAL = 1500;
-    let runError: Error | undefined;
-    let replyMessageId = startBinding.messageId;
-    const idleTimeoutMs = getAgentIdleTimeoutMs();
-
-    try {
-      const stream = this.agent.sendMessageStream(sessionId, prompt, abortController.signal);
-
-      while (true) {
-        const iterResult = await nextAgentStreamEvent(stream, abortController, idleTimeoutMs);
-        if (iterResult.done) {
-          if (abortController.signal.aborted) {
-            this.logger.info(`任务被用户中断: ${conversationId}`);
-            resultText = activeRun.cancelReason || '⏹ 任务已被用户中断。';
-            stream.return?.(undefined as any).catch(() => {});
+      sessionId,
+      sourceMessageIds,
+      anchor,
+      agent: this.agent,
+      createResponder: (anchor) => this.messageGateway.createResponder(anchor),
+      activeRuns: {
+        set: (conversationId, activeRun) => {
+          this.activeRuns.set(conversationId, activeRun);
+        },
+        deleteIfCurrent: (conversationId, activeRun) => {
+          if (this.activeRuns.get(conversationId) === activeRun) {
+            this.activeRuns.delete(conversationId);
           }
-          break;
+        },
+      },
+      bindResponse: (binding, conversationId) => {
+        this.conversationRouter.bindResponseToConversation(binding, conversationId);
+      },
+      buildAgentSessionContext: (conversationId) => this.buildAgentSessionContext(conversationId),
+      getProviderNameForSession: (sessionId) => this.getProviderNameForSession(sessionId),
+      patchRequestContext,
+      recordProactiveRootMessage: ({ conversationId, rootMessageId, prompt, openId }) => {
+        const bound = this.historyStore.setConversationFirstMessageId(conversationId, rootMessageId);
+        if (!bound) {
+          this.logger.warn(`主动任务根消息绑定 conversation first_message_id 失败: conversation=${conversationId}, messageId=${rootMessageId}`);
         }
-        const event = iterResult.value;
-
-        allEvents.push(event);
-        displayEvents.push(event);
-
-        if ((event as any).metadata?.newSessionId) {
-          const fallbackSessionId = (event as any).metadata.newSessionId as string;
-          newSessionId = fallbackSessionId;
-          patchRequestContext({
-            conversationId,
-            sessionId: fallbackSessionId,
-            provider: this.getProviderNameForSession(fallbackSessionId),
-          });
-        }
-
-        if (event.type === 'result') {
-          resultText = event.content || '';
-          continue;
-        }
-
-        if (this.shouldUpdateResponse(event)) {
-          const now = Date.now();
-          if (now - lastUpdateTime >= UPDATE_INTERVAL) {
-            const binding = await responder.update({ events: displayEvents });
-            this.conversationRouter.bindResponseToConversation(binding, conversationId);
-            if (binding?.messageId) replyMessageId = binding.messageId;
-            lastUpdateTime = now;
-          }
-        }
-      }
-    } catch (error: any) {
-      if (error instanceof AgentRunIdleTimeoutError) {
-        this.logger.error(
-          `Agent 流式处理 idle timeout: conv=${conversationId}, session=${sessionId}, timeoutMs=${error.idleTimeoutMs}`,
-          error,
-        );
-      } else {
-        this.logger.error('Agent 流式处理异常:', error);
-      }
-      runError = error instanceof Error ? error : new Error(String(error));
-      resultText = resultText || `处理出错: ${runError.message}`;
-    }
-
-    try {
-      if (newSessionId) {
-        this.historyStore.updateAgentSessionId(conversationId, newSessionId);
-        this.restoredSessions.add(newSessionId);
-        this.logger.info(`Fallback 更新会话: ${conversationId} -> ${newSessionId}`);
-      }
-
-      const effectiveSessionId = newSessionId ?? sessionId;
-      const resumeId = this.agent.getResumeId(effectiveSessionId);
-      if (resumeId) {
+        this.recordProactiveMessageAfterSend(rootMessageId, `[主动任务] ${prompt}`, openId);
+      },
+      saveAgentSessionId: (conversationId, sessionId) => {
+        this.historyStore.updateAgentSessionId(conversationId, sessionId);
+      },
+      rememberRestoredSession: (sessionId) => {
+        this.restoredSessions.add(sessionId);
+      },
+      saveResumeId: (conversationId, resumeId) => {
         this.historyStore.updateResumeId(conversationId, resumeId);
-      }
-
-      this.historyStore.saveAgentEvents(conversationId, this.agent.name, allEvents);
-
-      const finalBinding = await responder.complete({ events: displayEvents, text: resultText });
-      this.conversationRouter.bindResponseToConversation(finalBinding, conversationId);
-      if (finalBinding.messageId) replyMessageId = finalBinding.messageId;
-
-      this.logger.info(`处理完成，回复长度: ${resultText.length}`);
-    } finally {
-      try {
-        const effectiveSessionId = newSessionId ?? sessionId;
-        const resumeId = this.agent.getResumeId(effectiveSessionId);
-        if (resumeId) {
-          this.historyStore.updateResumeId(conversationId, resumeId);
-        }
-      } catch (err) {
-        this.logger.warn('持久化 resume_id 失败:', err);
-      }
-      if (this.activeRuns.get(conversationId) === activeRun) {
-        this.activeRuns.delete(conversationId);
-      }
-    }
-
-    if (runError) {
-      return { replyMessageId, status: 'failed', error: runError };
-    }
-    if (abortController.signal.aborted) {
-      return { replyMessageId, status: 'cancelled' };
-    }
-    return { replyMessageId, status: 'success' };
+      },
+      saveAgentEvents: (conversationId, provider, events) => {
+        this.historyStore.saveAgentEvents(conversationId, provider, events);
+      },
+      logger: this.logger,
+    });
   }
 
   // ─── 斜杠命令 ───
@@ -627,13 +512,6 @@ export class SageCore {
         `取消运行中任务: conv=${activeRun.conversationId}, source=${source}, sourceMessages=${Array.from(activeRun.sourceMessageIds).join(',')}`,
       );
     }
-  }
-
-  private shouldUpdateResponse(event: AgentEvent): boolean {
-    return event.type === 'tool_call'
-      || event.type === 'thinking'
-      || event.type === 'text'
-      || event.type === 'notice';
   }
 
   private normalizeProactiveTopic(title?: string): string {

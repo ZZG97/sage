@@ -136,6 +136,21 @@ class IdleAgentProvider extends FakeAgentProvider {
   }
 }
 
+class NewSessionMetadataAgentProvider extends FakeAgentProvider {
+  readonly name = 'new-session-agent';
+
+  override async *sendMessageStream(sessionId: string, message: string): AsyncGenerator<AgentEvent> {
+    this.receivedMessages.push({ sessionId, message });
+    yield {
+      type: 'result',
+      content: `Echo after fallback: ${message}`,
+      ts: new Date().toISOString(),
+      persist: true,
+      metadata: { newSessionId: 'fake-fallback-42' },
+    } as AgentEvent & { metadata: { newSessionId: string } };
+  }
+}
+
 const tempDirs: string[] = [];
 const originalRestartEnv = {
   OWNER_OPEN_ID: process.env.OWNER_OPEN_ID,
@@ -394,6 +409,40 @@ describe('SageCore message gateway boundary', () => {
 
       expect(agent.aborted).toBe(true);
       expect(completedTexts(gateway).at(-1)).toBe('⏹ 已因用户撤回原消息而取消。');
+    } finally {
+      historyStore.destroy();
+    }
+  });
+
+  it('persists fallback session metadata from agent stream events', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sage-core-test-'));
+    tempDirs.push(dir);
+    const historyStore = new HistoryStore(path.join(dir, 'history.db'), 'test');
+    const agent = new NewSessionMetadataAgentProvider();
+    const gateway = new InMemoryMessageGateway();
+    new SageCore(agent, historyStore, gateway);
+
+    try {
+      await gateway.emitMessage(testMessage({
+        text: 'fallback turn',
+        messageId: 'om_fallback_metadata',
+      }));
+
+      const session = historyStore.getSessionByFirstMessageId('om_fallback_metadata');
+      expect(session?.agent_session_id).toBe('fake-fallback-42');
+      expect(session?.resume_id).toBe('resume-fake-fallback-42');
+      expect(completedTexts(gateway).at(-1)).toBe('Echo after fallback: fallback turn');
+
+      await gateway.emitMessage(testMessage({
+        text: 'after fallback',
+        messageId: 'om_after_fallback',
+        threadId: session!.thread_id!,
+      }));
+
+      expect(agent.receivedMessages.at(-1)).toEqual({
+        sessionId: 'fake-fallback-42',
+        message: 'after fallback',
+      });
     } finally {
       historyStore.destroy();
     }

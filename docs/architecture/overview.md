@@ -9,6 +9,7 @@ Feishu WebSocket
   -> FeishuService
   -> MessageContext
   -> SageCore
+  -> AgentTurnRunner
   -> AgentProvider.sendMessageStream()
   -> provider SDK / local tools
   -> AgentEvent stream
@@ -37,7 +38,8 @@ bunqueue scheduler
 
 ## Major Components
 
-- `SageCore`: owns provider session routing, active runs, queueing, `/stop`, `/clear`, provider switching, and proactive agent execution.
+- `SageCore`: owns provider session routing, queueing, `/stop`, `/clear`, provider switching, proactive agent orchestration, and shutdown/restart lifecycle.
+- `AgentTurnRunner`: owns one assistant turn's stream loop, active-run registration/cleanup, response update/complete lifecycle, idle timeout handling, and final session/resume/event persistence callbacks.
 - `ConversationRouter`: owns external message/thread identity lookup, in-memory routing caches, and conversation binding to stable internal `conv_*` IDs.
 - `MessageGateway`: transport-neutral messaging boundary used by Core.
 - `FeishuService`: production gateway implementation for Feishu events, rich media, streaming cards, uploads, and replies.
