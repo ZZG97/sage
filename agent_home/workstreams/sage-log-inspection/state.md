@@ -10,7 +10,7 @@ title `Sage 日志巡检`, cron `0 10 * * *` Asia/Shanghai. Created 2026-06-10
 through local management API. It runs a read-only shell collection step followed
 by an agent analysis step that must obey this workstream's README/state.
 
-**Last Inspection:** 2026-06-16 10:00 scheduled read-only pass. Checked recent
+**Last Inspection:** 2026-06-17 10:00 scheduled read-only pass. Checked recent
 Operations rows and PM2 `sage` / `sage-dev` logs from the workflow artifact.
 No raw logs were committed.
 
@@ -37,11 +37,11 @@ No raw logs were committed.
   2026-06-16; no active watch.
 
 **Watch Items:**
-- RSS AI refresh reliability: recent 7-day Operations summary shows 42 warning
-  `rss.ai.refresh` runs and 38 successes. On 2026-06-15 through early
-  2026-06-16, many warnings saw entries but classified zero items because AI
-  batches failed. This has shifted from rare timeout to recurring partial
-  failure; ask before opening a focused RSS reliability fix.
+- RSS AI refresh reliability: recent 7-day Operations summary on 2026-06-17
+  shows 41 warning `rss.ai.refresh` runs and 39 successes. Warnings clustered
+  on 2026-06-15 through early 2026-06-16 with entries seen but zero classified;
+  later successes resumed through 2026-06-17 08:30. Keep watching recurrence
+  before opening a focused RSS reliability fix.
 - OpenCode provider availability: verify intent before fixing. If OpenCode is
   optional, this may be expected fallback noise; if it is primary, inspect
   service health and provider startup dependency in a normal coding turn.
@@ -60,7 +60,13 @@ No raw logs were committed.
 - RSS AI batch partial failures: repeated warning runs with new entries but zero
   classified items likely deserve a focused fix if Laozhang confirms RSS AI
   classification should be reliable by default.
+- Debug database browser: on 2026-06-17, prod and dev logged
+  `/apps/debug/databases` failures with SQLite unable to open a database file.
+  Current source appears to skip unreadable database files, so first confirm
+  whether the running service has that guard loaded; if it does, inspect stale
+  cached handles or incomplete database files. Ask before opening a fix.
 
 **Next Step:** Ask Laozhang before opening code changes. If approved, prioritize
-RSS AI batch failure diagnostics. Network faults confirmed recovered on
-2026-06-16; do not keep active watch unless they recur.
+the debug database browser investigation, then RSS AI batch diagnostics if
+warnings recur. Network faults confirmed recovered on 2026-06-16; do not keep
+active watch unless they recur.
