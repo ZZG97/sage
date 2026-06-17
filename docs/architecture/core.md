@@ -6,14 +6,18 @@
 
 Owned by Core:
 
-- Conversation lookup and creation.
 - Per-conversation message queueing.
 - Agent session creation, restore, and resume ID persistence.
 - Active run tracking and cancellation.
 - Provider stream idle timeout supervision.
 - Slash commands that affect runtime state.
 - Proactive agent execution for scheduler-triggered owner messages.
-- Binding response messages/thread IDs back to conversations.
+
+Owned by `ConversationRouter`:
+
+- Conversation lookup and creation.
+- Runtime message/thread routing caches.
+- Binding incoming and response message/thread IDs back to stable conversations.
 
 Not owned by Core:
 
@@ -27,12 +31,13 @@ Not owned by Core:
 - `MessageContext`: normalized inbound message from the gateway.
 - `MessageGateway`: transport-neutral gateway contract.
 - `AssistantResponder`: semantic response lifecycle: `start`, `update`, `complete`, `fail`, `close`.
+- `ConversationRouter`: transport-neutral conversation identity lookup and binding.
 - `AgentProvider`: model/tool backend contract.
 - `HistoryStore`: SQLite persistence for sessions, events, processed Feishu events, and proactive roots.
 
 ## Conversation Identity
 
-Internal conversation IDs are immutable `conv_*` values. Feishu `first_message_id` and `thread_id` are external lookup fields. Provider session IDs and SDK resume IDs are separate fields.
+Internal conversation IDs are immutable `conv_*` values. `ConversationRouter` maps external `first_message_id`, `thread_id`, root message IDs, and response bindings to those internal IDs. Provider session IDs and SDK resume IDs are separate fields.
 
 This avoids tying Sage's internal state to a Feishu message/thread ID or to a specific provider backend.
 
@@ -48,4 +53,4 @@ This avoids tying Sage's internal state to a Feishu message/thread ID or to a sp
 
 - Provider run supervision is intentionally first-pass only; it does not yet provide circuit breaking, cooldowns, or structured provider error classification.
 - Some provider fallback metadata still uses loose event metadata.
-- Core remains large and should eventually be split into conversation routing, run execution, slash commands, and proactive execution.
+- Core remains large and should eventually be split further into run execution and proactive execution.

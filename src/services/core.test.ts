@@ -289,6 +289,116 @@ describe('SageCore message gateway boundary', () => {
     }
   });
 
+  it('routes replies by stored first message id across Core instances', async () => {
+    const { historyStore, gateway, destroy } = createCoreHarness();
+
+    try {
+      await gateway.emitMessage(testMessage({
+        text: 'first turn',
+        messageId: 'om_root_db',
+      }));
+
+      const session = historyStore.getSessionByFirstMessageId('om_root_db');
+      expect(session).not.toBeNull();
+      expect(session?.agent_session_id).toBe('fake-1');
+
+      const nextAgent = new FakeAgentProvider();
+      const nextGateway = new InMemoryMessageGateway();
+      new SageCore(nextAgent, historyStore, nextGateway);
+
+      await nextGateway.emitMessage(testMessage({
+        text: 'reply turn',
+        messageId: 'om_reply_db',
+        rootId: 'om_root_db',
+      }));
+
+      expect(nextAgent.receivedMessages).toEqual([
+        { sessionId: 'fake-1', message: 'reply turn' },
+      ]);
+      expect(historyStore.getSessionByFirstMessageId('om_reply_db')).toBeNull();
+
+      const events = historyStore.getSessionEvents(session!.id);
+      expect(events.map((event) => [event.role, event.type, event.content])).toContainEqual([
+        'user',
+        'text',
+        'first turn',
+      ]);
+      expect(events.map((event) => [event.role, event.type, event.content])).toContainEqual([
+        'user',
+        'text',
+        'reply turn',
+      ]);
+    } finally {
+      destroy();
+    }
+  });
+
+  it('prioritizes thread routing before reply root routing', async () => {
+    const { agent, historyStore, gateway, destroy } = createCoreHarness();
+
+    try {
+      await gateway.emitMessage(testMessage({
+        text: 'conversation a',
+        messageId: 'om_thread_a',
+      }));
+      await gateway.emitMessage(testMessage({
+        text: 'conversation b',
+        messageId: 'om_thread_b',
+      }));
+
+      const sessionA = historyStore.getSessionByFirstMessageId('om_thread_a');
+      const sessionB = historyStore.getSessionByFirstMessageId('om_thread_b');
+      expect(sessionA?.thread_id).toBe('test_thread_1');
+      expect(sessionB?.thread_id).toBe('test_thread_2');
+
+      await gateway.emitMessage(testMessage({
+        text: 'thread wins',
+        messageId: 'om_thread_conflict',
+        threadId: sessionB!.thread_id!,
+        rootId: 'om_thread_a',
+      }));
+
+      expect(agent.receivedMessages.at(-1)).toEqual({
+        sessionId: sessionB!.agent_session_id!,
+        message: 'thread wins',
+      });
+
+      const events = historyStore.getSessionEvents(sessionB!.id);
+      expect(events.map((event) => [event.role, event.type, event.content])).toContainEqual([
+        'user',
+        'text',
+        'thread wins',
+      ]);
+    } finally {
+      destroy();
+    }
+  });
+
+  it('cancels an active run when the source message is recalled', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sage-core-test-'));
+    tempDirs.push(dir);
+    const historyStore = new HistoryStore(path.join(dir, 'history.db'), 'test');
+    const agent = new IdleAgentProvider();
+    const gateway = new InMemoryMessageGateway();
+    new SageCore(agent, historyStore, gateway);
+
+    try {
+      const run = gateway.emitMessage(testMessage({
+        text: 'cancel me',
+        messageId: 'om_recalled_active',
+      }));
+      await waitFor(() => agent.receivedMessages.length === 1);
+
+      await gateway.emitRecall('om_recalled_active');
+      await run;
+
+      expect(agent.aborted).toBe(true);
+      expect(completedTexts(gateway).at(-1)).toBe('⏹ 已因用户撤回原消息而取消。');
+    } finally {
+      historyStore.destroy();
+    }
+  });
+
   it('allows /restart for OWNER_OPEN_ID and executes the prod restart command', async () => {
     process.env.OWNER_OPEN_ID = 'ou_owner';
     process.env.name = 'sage';

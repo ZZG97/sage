@@ -37,7 +37,8 @@ bunqueue scheduler
 
 ## Major Components
 
-- `SageCore`: owns conversation identity, provider session routing, active runs, queueing, `/stop`, `/clear`, provider switching, and proactive agent execution.
+- `SageCore`: owns provider session routing, active runs, queueing, `/stop`, `/clear`, provider switching, and proactive agent execution.
+- `ConversationRouter`: owns external message/thread identity lookup, in-memory routing caches, and conversation binding to stable internal `conv_*` IDs.
 - `MessageGateway`: transport-neutral messaging boundary used by Core.
 - `FeishuService`: production gateway implementation for Feishu events, rich media, streaming cards, uploads, and replies.
 - `AgentProvider`: provider abstraction for Codex, Claude Code, CC-MiniMax, OpenCode, and fallback.
