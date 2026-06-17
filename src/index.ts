@@ -1,10 +1,11 @@
 import { SageCore } from './services/core';
+import { FeishuService } from './services/feishu';
 import { WebServer } from './services/web';
 import { HistoryStore } from './services/history-store';
 import { TaskScheduler } from './services/task-scheduler';
 import { getBuiltinTasks } from './services/tasks';
 import { registerSchedulerRoutes } from './apps/management/routes';
-import { validateConfig, getAgentConfig, getAllAvailableProviderConfigs } from './config';
+import { appConfig, validateConfig, getAgentConfig, getAllAvailableProviderConfigs } from './config';
 import { createAgentProvider } from './agent';
 import { Logger } from './utils';
 import { closeAllDatabases } from './shared/db';
@@ -38,8 +39,9 @@ class Application {
       const env = process.env.NODE_ENV === 'development' ? 'dev' : 'production';
       this.historyStore = new HistoryStore(undefined, env);
 
-      // 创建核心服务
-      this.sageCore = new SageCore(agent, this.historyStore);
+      // 创建生产消息网关并注入核心服务
+      const messageGateway = new FeishuService(appConfig.feishu);
+      this.sageCore = new SageCore(agent, this.historyStore, messageGateway);
 
       // 创建调度器（bunqueue-based）
       const isDev = env === 'dev';

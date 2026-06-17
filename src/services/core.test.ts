@@ -233,6 +233,29 @@ function testMessage(overrides: Partial<MessageContext> = {}): MessageContext {
 }
 
 describe('SageCore message gateway boundary', () => {
+  it('does not register process signal handlers from Core.start', async () => {
+    const { core, destroy } = createCoreHarness();
+    const sigintListeners = process.listenerCount('SIGINT');
+    const sigtermListeners = process.listenerCount('SIGTERM');
+
+    try {
+      await core.start();
+
+      expect(process.listenerCount('SIGINT')).toBe(sigintListeners);
+      expect(process.listenerCount('SIGTERM')).toBe(sigtermListeners);
+
+      await core.stop();
+
+      expect(process.listenerCount('SIGINT')).toBe(sigintListeners);
+      expect(process.listenerCount('SIGTERM')).toBe(sigtermListeners);
+    } finally {
+      if (core.getStatus().isRunning) {
+        await core.stop();
+      }
+      destroy();
+    }
+  });
+
   it('processes an injected message through Core without Feishu transport', async () => {
     const { agent, historyStore, gateway, destroy } = createCoreHarness();
 

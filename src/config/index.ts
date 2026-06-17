@@ -1,4 +1,4 @@
-import { AppConfig } from '../types';
+import type { AppConfig } from '../types';
 import { AgentProviderConfig } from '../agent';
 
 function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean {
@@ -24,6 +24,61 @@ const httpAuthTokens = uniqueNonEmpty([
   process.env.SAGE_INTERNAL_HTTP_TOKEN,
 ]);
 
+export const DEFAULT_HTTP_HOST = '127.0.0.1';
+
+interface HttpExposureRuntimeEnv {
+  NODE_ENV?: string;
+  SAGE_INSTANCE?: string;
+  PROCESS_NAME?: string;
+}
+
+function isHttpAuthConfiguredForStartup(auth: AppConfig['server']['auth']): boolean {
+  return auth.tokens.length > 0;
+}
+
+function isHttpAuthEnabledForStartup(auth: AppConfig['server']['auth']): boolean {
+  return auth.required || isHttpAuthConfiguredForStartup(auth);
+}
+
+export function isProductionRuntime(env: HttpExposureRuntimeEnv = process.env): boolean {
+  if (env.SAGE_INSTANCE === 'sage' || env.PROCESS_NAME === 'sage') return true;
+  if (env.SAGE_INSTANCE === 'sage-dev' || env.PROCESS_NAME === 'sage-dev') return false;
+  return env.NODE_ENV !== 'development' && env.NODE_ENV !== 'test';
+}
+
+export function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  const unbracketed = normalized.startsWith('[') && normalized.endsWith(']')
+    ? normalized.slice(1, -1)
+    : normalized;
+
+  return unbracketed === 'localhost'
+    || unbracketed === '::1'
+    || unbracketed === '0:0:0:0:0:0:0:1'
+    || /^127(?:\.\d{1,3}){3}$/.test(unbracketed);
+}
+
+export function getHttpServerExposureError(
+  server: AppConfig['server'],
+  env: HttpExposureRuntimeEnv = process.env,
+): string | null {
+  const authConfigured = isHttpAuthConfiguredForStartup(server.auth);
+
+  if (server.auth.required && !authConfigured) {
+    return 'SAGE_HTTP_AUTH_REQUIRED is enabled but no SAGE_HTTP_TOKEN or SAGE_INTERNAL_HTTP_TOKEN is configured';
+  }
+
+  if (!isProductionRuntime(env) || isLoopbackHost(server.host)) {
+    return null;
+  }
+
+  if (!isHttpAuthEnabledForStartup(server.auth) || !authConfigured) {
+    return `Refusing to start production HTTP server on non-loopback host ${server.host} without Sage HTTP auth token`;
+  }
+
+  return null;
+}
+
 export const appConfig: AppConfig = {
   feishu: {
     appId: process.env.FEISHU_APP_ID || '',
@@ -35,7 +90,7 @@ export const appConfig: AppConfig = {
   },
   server: {
     port: parseInt(process.env.PORT || '3000', 10),
-    host: process.env.HOST || '0.0.0.0',
+    host: process.env.HOST || DEFAULT_HTTP_HOST,
     auth: {
       required: parseBooleanEnv(process.env.SAGE_HTTP_AUTH_REQUIRED, httpAuthTokens.length > 0),
       tokens: httpAuthTokens,
@@ -153,6 +208,12 @@ export function validateConfig(): boolean {
 
   if (missing.length > 0) {
     console.error('缺少必需的环境变量:', missing.join(', '));
+    return false;
+  }
+
+  const httpExposureError = getHttpServerExposureError(appConfig.server);
+  if (httpExposureError) {
+    console.error('HTTP 服务配置不安全:', httpExposureError);
     return false;
   }
 
