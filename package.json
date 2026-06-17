@@ -12,6 +12,7 @@
     "clean": "rm -rf dist",
     "test": "bun test ./src",
     "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun run test && cd web && bun run build",
     "lint": "echo 'Linting...' && exit 0",
     "dev:start": "pm2 start ecosystem.config.cjs --only sage-dev",
     "dev:stop": "pm2 stop sage-dev",
