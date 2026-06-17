@@ -269,6 +269,26 @@ describe('SageCore message gateway boundary', () => {
     }
   });
 
+  it('handles synchronous slash commands before agent queueing', async () => {
+    const { agent, destroy, gateway } = createCoreHarness();
+
+    try {
+      await gateway.emitMessage(testMessage({
+        text: ' /help ',
+        messageId: 'om_help',
+      }));
+
+      expect(agent.receivedMessages).toHaveLength(0);
+      expect(completedTexts(gateway).at(-1)).toContain('/restart - 优雅重启服务');
+      expect(completedTexts(gateway).at(-1)).toContain('• 当前 Agent: fake-agent');
+      expect(gateway.outboundMessages.find(message =>
+        message.type === 'response_start' && message.parentMessageId === 'om_help'
+      )).toBeDefined();
+    } finally {
+      destroy();
+    }
+  });
+
   it('allows /restart for OWNER_OPEN_ID and executes the prod restart command', async () => {
     process.env.OWNER_OPEN_ID = 'ou_owner';
     process.env.name = 'sage';

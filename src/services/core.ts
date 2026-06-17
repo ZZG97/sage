@@ -9,6 +9,17 @@ import { MessageContext } from '../types';
 import { execSync } from 'child_process';
 import type { AssistantResponder, MessageGateway, ResponseAnchor, ResponseBinding } from './message-gateway';
 import { AgentRunIdleTimeoutError, getAgentIdleTimeoutMs, nextAgentStreamEvent } from './agent-run-supervisor';
+import {
+  buildRestartStartText,
+  getRestartExecutorCommand,
+  handleSlashCommand,
+  RESTART_COMPLETE_TEXT,
+  RESTART_INTERRUPTED_TEXT,
+  type SlashCommandRuntime,
+  type SlashRestartRejectReason,
+  type SlashRuntimeStatus,
+  type SlashThreadInfo,
+} from './slash-commands';
 
 // ─── 常量 ───
 const DRAIN_TIMEOUT = 30_000; // drain 最多等 30s
@@ -43,6 +54,7 @@ export class SageCore {
   private historyStore: HistoryStore;
   private logger: Logger;
   private restartExecutor: (command: string) => void;
+  private slashCommandRuntime: SlashCommandRuntime;
   private isRunning: boolean = false;
   private isDraining: boolean = false;
 
@@ -73,6 +85,7 @@ export class SageCore {
     this.restartExecutor = options.restartExecutor ?? ((command: string) => {
       execSync(command, { timeout: 10_000 });
     });
+    this.slashCommandRuntime = this.createSlashCommandRuntime();
 
     // 设置消息处理器（不再返回 string，SageCore 自行控制输出生命周期）
     this.messageGateway.setMessageHandler(this.handleIncomingMessage.bind(this));
@@ -103,12 +116,12 @@ export class SageCore {
     }
 
     // 斜杠命令不排队，立即处理
-    const commandResult = this.handleSlashCommand(ctx);
-    if (commandResult === 'async') return;
-    if (commandResult !== null) {
+    const commandResult = handleSlashCommand(ctx, this.slashCommandRuntime);
+    if (commandResult?.kind === 'async') return;
+    if (commandResult?.kind === 'reply') {
       await this.messageGateway
         .createResponder({ kind: 'reply', parentMessageId: ctx.messageId })
-        .complete({ events: [], text: commandResult });
+        .complete({ events: [], text: commandResult.text });
       return;
     }
 
@@ -396,76 +409,76 @@ export class SageCore {
 
   // ─── 斜杠命令 ───
 
-  private handleSlashCommand(ctx: MessageContext): string | null | 'async' {
-    const text = ctx.text.trim();
-
-    if (text === '/thread_id') return this.cmdThreadId(ctx);
-    if (text === '/clear') return this.cmdClear(ctx);
-    if (text === '/stop') return this.cmdStop(ctx);
-    if (text === '/help') return this.cmdHelp();
-    if (text === '/status') return this.cmdStatus();
-    if (text.startsWith('/fallback')) return this.cmdFallback(text);
-    if (text.startsWith('/provider')) return this.cmdProvider(text);
-    if (text === '/restart') {
-      const processName = this.getProcessName();
-      const access = this.getRestartAccessDecision(ctx, processName);
-      if (!access.allowed) return access.message;
-      this.cmdRestart(ctx);
-      return 'async';
-    }
-
-    return null;
+  private createSlashCommandRuntime(): SlashCommandRuntime {
+    return {
+      getThreadInfo: (ctx) => this.getThreadInfoForSlashCommand(ctx),
+      clearCurrentContext: (ctx) => this.clearCurrentContextForSlashCommand(ctx),
+      stopActiveRun: (ctx) => this.stopActiveRunForSlashCommand(ctx),
+      getStatus: () => this.getStatusForSlashCommand(),
+      getProviderInfo: () => this.getProviderInfo(),
+      setAutoFallback: (enabled) => this.setAutoFallback(enabled),
+      switchProvider: (name) => this.switchProvider(name),
+      getRestartPolicyContext: () => this.getRestartPolicyContextForSlashCommand(),
+      recordRestartRejected: (reason, ctx) => this.recordRestartRejectedForSlashCommand(reason, ctx),
+      restart: (ctx) => {
+        void this.restartFromSlashCommand(ctx);
+      },
+    };
   }
 
-  private cmdThreadId(ctx: MessageContext): string {
+  private getThreadInfoForSlashCommand(ctx: MessageContext): SlashThreadInfo {
     const conversationId = this.findConversation(ctx);
     const session = conversationId ? this.historyStore.getSession(conversationId) : null;
 
-    if (ctx.threadId) {
-      const info = [
-        `Thread ID: ${ctx.threadId}`,
-        `Conversation ID: ${conversationId || '未创建'}`,
-        `Agent Provider: ${this.agent.name}`,
-        `Session: ${session?.agent_session_id || '未创建'}`,
-        `创建者: ${session?.open_id || 'N/A'}`,
-        `最后活跃: ${session?.last_active_at || 'N/A'}`,
-      ];
-      return info.join('\n');
-    }
-
-    return `当前不在话题中。消息 ID: ${ctx.messageId}`;
+    return {
+      threadId: ctx.threadId,
+      messageId: ctx.messageId,
+      conversationId,
+      agentProvider: this.agent.name,
+      agentSessionId: session?.agent_session_id ?? null,
+      creatorOpenId: session?.open_id ?? null,
+      lastActiveAt: session?.last_active_at ?? null,
+    };
   }
 
-  private cmdClear(ctx: MessageContext): string {
+  private clearCurrentContextForSlashCommand(ctx: MessageContext): boolean {
     const conversationId = this.findConversation(ctx);
     const session = conversationId ? this.historyStore.getSession(conversationId) : null;
 
-    if (session?.agent_session_id) {
-      this.agent.deleteSession(session.agent_session_id).catch(err => {
-        this.logger.error('删除 Agent 会话失败:', err);
-      });
-      this.historyStore.clearSessionAgent(session.id);
-      this.restoredSessions.delete(session.agent_session_id);
-      this.logger.info(`清除 conversation 会话: ${session.id}`);
-      return '已清空当前话题的上下文。下一条消息将开启新的对话。';
-    }
+    if (!session?.agent_session_id) return false;
 
-    return '当前话题没有活跃的上下文。';
+    this.agent.deleteSession(session.agent_session_id).catch(err => {
+      this.logger.error('删除 Agent 会话失败:', err);
+    });
+    this.historyStore.clearSessionAgent(session.id);
+    this.restoredSessions.delete(session.agent_session_id);
+    this.logger.info(`清除 conversation 会话: ${session.id}`);
+    return true;
   }
 
-  private cmdStop(ctx: MessageContext): string {
+  private stopActiveRunForSlashCommand(ctx: MessageContext): boolean {
     const conversationId = this.findConversation(ctx);
-    if (!conversationId) return '当前话题没有正在执行的任务。';
+    if (!conversationId) return false;
 
     const activeRun = this.activeRuns.get(conversationId);
-    if (activeRun) {
-      this.cancelActiveRun(activeRun, '⏹ 任务已被用户中断。', 'user_stop_command');
-      return '⏹ 已中断当前任务';
-    }
-    return '当前话题没有正在执行的任务。';
+    if (!activeRun) return false;
+
+    this.cancelActiveRun(activeRun, '⏹ 任务已被用户中断。', 'user_stop_command');
+    return true;
   }
 
-  private async cmdRestart(ctx: MessageContext): Promise<void> {
+  private getStatusForSlashCommand(): SlashRuntimeStatus {
+    const status = this.getStatus();
+    return {
+      agentProvider: status.agentProvider,
+      isRunning: status.isRunning,
+      sessionCount: status.sessionCount,
+      activeRunCount: status.activeCards,
+      isDraining: status.isDraining,
+    };
+  }
+
+  private async restartFromSlashCommand(ctx: MessageContext): Promise<void> {
     const processName = this.getProcessName();
     this.logger.info(`收到 /restart 命令，准备优雅重启 (process: ${processName})`);
 
@@ -473,7 +486,7 @@ export class SageCore {
     const restartResponder = this.messageGateway.createResponder({ kind: 'reply', parentMessageId: ctx.messageId });
     await restartResponder.complete({
       events: [],
-      text: `🔄 正在优雅重启...\n活跃任务: ${this.activeRuns.size}，等待处理完成后重启。`,
+      text: buildRestartStartText(this.activeRuns.size),
     });
 
     // Step 1: drain — 拒绝新消息，等待活跃任务完成
@@ -504,19 +517,17 @@ export class SageCore {
     if (this.activeRuns.size > 0) {
       await Promise.allSettled(
         Array.from(this.activeRuns.values()).map(activeRun =>
-          activeRun.responder.close('⚠️ 服务正在重启，当前对话已中断。请重新发送消息继续。').catch(() => {})
+          activeRun.responder.close(RESTART_INTERRUPTED_TEXT).catch(() => {})
         )
       );
       this.activeRuns.clear();
     }
 
     // Step 3: 更新重启确认卡片为完成状态
-    await restartResponder.complete({ events: [], text: '✅ 服务即将重启，请稍后发送消息继续。' }).catch(() => {});
+    await restartResponder.complete({ events: [], text: RESTART_COMPLETE_TEXT }).catch(() => {});
 
     // Step 4: 走 package script 重启，确保手动命令和聊天命令使用同一入口
-    const restartCommand = processName === 'sage-dev'
-      ? 'bun run dev:restart'
-      : 'bun run prod:restart';
+    const restartCommand = getRestartExecutorCommand(processName);
     this.logger.info(`/restart: drain 完成，执行 ${restartCommand}`);
     try {
       // 等待 drain 完成后再 restart，避免 pm2 kill 时 activeRuns 还未清空
@@ -530,31 +541,14 @@ export class SageCore {
     return process.env.name || appConfig.processName || 'sage';
   }
 
-  private getRestartAccessDecision(ctx: MessageContext, processName: string): { allowed: true } | { allowed: false; message: string } {
-    const ownerOpenId = process.env.OWNER_OPEN_ID?.trim();
-
-    if (ownerOpenId) {
-      if (ctx.openId === ownerOpenId) return { allowed: true };
-      this.logger.warn(`/restart 被拒绝: open=${ctx.openId}, owner configured`);
-      return {
-        allowed: false,
-        message: '⛔ /restart 已拒绝：只有 OWNER_OPEN_ID 配置的 owner 可以重启服务。',
-      };
-    }
-
-    if (this.isDevRestartProcess(processName)) {
-      if (ctx.chatType === 'p2p') return { allowed: true };
-      this.logger.warn(`/restart 被拒绝: OWNER_OPEN_ID 未配置，dev 仅允许私聊重启`);
-      return {
-        allowed: false,
-        message: '⛔ /restart 已拒绝：dev 未配置 OWNER_OPEN_ID 时，仅允许私聊触发重启。',
-      };
-    }
-
-    this.logger.warn('/restart 被拒绝: 生产环境未配置 OWNER_OPEN_ID');
+  private getRestartPolicyContextForSlashCommand(): {
+    ownerOpenId?: string;
+    isDevProcess: boolean;
+  } {
+    const processName = this.getProcessName();
     return {
-      allowed: false,
-      message: '⛔ /restart 已禁用：生产环境必须配置 OWNER_OPEN_ID，且只能由 owner 执行。',
+      ownerOpenId: process.env.OWNER_OPEN_ID?.trim() || undefined,
+      isDevProcess: this.isDevRestartProcess(processName),
     };
   }
 
@@ -562,89 +556,16 @@ export class SageCore {
     return processName === 'sage-dev' || process.env.SAGE_INSTANCE === 'sage-dev';
   }
 
-  private cmdHelp(): string {
-    return [
-      '可用命令:',
-      '',
-      '/thread_id - 查看当前话题 ID 和会话信息',
-      '/clear - 清空当前话题的上下文',
-      '/stop - 中断当前话题正在执行的任务',
-      '/status - 查看服务状态',
-      '/fallback [on|off] - 查看/切换自动降级开关',
-      '/provider [name] - 查看/切换活跃 provider',
-      '/restart - 优雅重启服务（需 OWNER_OPEN_ID owner；dev 未配置时仅私聊可用）',
-      '/help - 显示此帮助信息',
-      '',
-      '使用说明:',
-      `• 当前 Agent: ${this.agent.name}`,
-      '• 每条新消息会创建独立的话题上下文',
-      '• 在话题中回复的消息共享同一上下文',
-      '• 不同话题之间完全隔离',
-    ].join('\n');
-  }
-
-  private cmdStatus(): string {
-    const status = this.getStatus();
-    const lines = [
-      `Agent: ${this.agent.name}`,
-      `运行中: ${status.isRunning ? '是' : '否'}`,
-      `活跃会话: ${status.sessionCount}`,
-      `活跃任务: ${this.activeRuns.size}`,
-    ];
-    if (this.agent instanceof FallbackAgentProvider) {
-      lines.push(`自动降级: ${this.agent.autoFallbackEnabled ? '开启' : '关闭'}`);
-      lines.push(`当前活跃: ${this.agent.activeProviderName}`);
+  private recordRestartRejectedForSlashCommand(reason: SlashRestartRejectReason, ctx: MessageContext): void {
+    if (reason === 'non-owner') {
+      this.logger.warn(`/restart 被拒绝: open=${ctx.openId}, owner configured`);
+      return;
     }
-    if (this.isDraining) lines.push('⚠️ 服务正在关闭中 (drain)');
-    return lines.join('\n');
-  }
-
-  private cmdFallback(text: string): string {
-    if (!(this.agent instanceof FallbackAgentProvider)) {
-      return '当前未配置 fallback provider，无法切换。';
+    if (reason === 'dev-non-p2p') {
+      this.logger.warn(`/restart 被拒绝: OWNER_OPEN_ID 未配置，dev 仅允许私聊重启`);
+      return;
     }
-
-    const arg = text.replace('/fallback', '').trim().toLowerCase();
-    if (!arg) {
-      return `自动降级: ${this.agent.autoFallbackEnabled ? '✅ 开启' : '❌ 关闭'}\n用法: /fallback on|off`;
-    }
-
-    if (arg === 'on') {
-      this.agent.setAutoFallback(true);
-      return '✅ 自动降级已开启';
-    }
-    if (arg === 'off') {
-      this.agent.setAutoFallback(false);
-      return '❌ 自动降级已关闭';
-    }
-
-    return `无效参数: ${arg}\n用法: /fallback on|off`;
-  }
-
-  private cmdProvider(text: string): string {
-    if (!(this.agent instanceof FallbackAgentProvider)) {
-      return `当前 provider: ${this.agent.name}\n仅配置了单个 provider，无法切换。`;
-    }
-
-    const arg = text.replace('/provider', '').trim();
-    if (!arg) {
-      const available = this.agent.availableProviders;
-      const active = this.agent.activeProviderName;
-      const lines = [
-        `当前活跃: ${active}`,
-        `可用 providers:`,
-        ...available.map(p => `  ${p === active ? '→' : ' '} ${p}`),
-        '',
-        '用法: /provider <name>',
-      ];
-      return lines.join('\n');
-    }
-
-    if (this.agent.switchActiveProvider(arg)) {
-      return `✅ 已切换到 ${arg}（新会话生效，已有会话不受影响）`;
-    }
-
-    return `未知 provider: ${arg}\n可用: ${this.agent.availableProviders.join(', ')}`;
+    this.logger.warn('/restart 被拒绝: 生产环境未配置 OWNER_OPEN_ID');
   }
 
   // ─── 会话管理 ───
