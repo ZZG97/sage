@@ -8,7 +8,7 @@ Owned by Core:
 
 - Per-conversation message queueing.
 - Agent session creation, restore, and resume ID persistence.
-- Active run cancellation and shutdown/restart drain policy.
+- Active run cancellation and runtime drain/stop policy.
 - Slash commands that affect runtime state.
 - Proactive agent execution for scheduler-triggered owner messages.
 
@@ -27,6 +27,7 @@ Owned by `ConversationRouter`:
 
 Not owned by Core:
 
+- Process signal handling, uncaught exception handling, unhandled rejection handling, or `process.exit`; `Application` in `src/index.ts` owns process lifecycle.
 - Feishu card JSON, PATCH behavior, image/file upload, or rich media parsing.
 - Provider SDK-specific event formats.
 - Product-domain app behavior.

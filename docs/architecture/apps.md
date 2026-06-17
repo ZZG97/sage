@@ -36,6 +36,7 @@ Small apps may omit files they do not need.
 - App services should expose domain operations, not raw DB primitives.
 - Cross-app reuse should go through `src/shared/` or a deliberate shared service.
 - App HTTP surfaces that read private state or mutate state must stay behind the shared Sage HTTP auth middleware.
+- Production startup fails closed when HTTP binds to a non-loopback host without a configured Sage HTTP token; explicit public binding remains valid only with auth configured.
 - Generated RSS feeds under `/apps/rss/feeds/*` are currently a deliberate public exception for FreshRSS consumption; protect them separately with a feed-specific token if that exposure changes.
 
 ## Current Gaps

@@ -4,7 +4,7 @@ import { serveStatic } from 'hono/bun';
 import { SageCore } from '../services/core';
 import type { TaskScheduler } from '../services/task-scheduler';
 import { AppError, createRequestId, Logger, normalizeRequestId, runWithRequestContext } from '../utils';
-import { appConfig } from '../config';
+import { appConfig, getHttpServerExposureError } from '../config';
 import { mountApps } from '../apps';
 import { createHttpAuthMiddleware, isHttpAuthConfigured, isHttpAuthEnabled, registerHttpAuthRoutes } from './http-auth';
 import { existsSync } from 'fs';
@@ -21,6 +21,11 @@ export class WebServer {
     this.sageCore = sageCore;
     this.port = appConfig.server.port;
     this.host = appConfig.server.host;
+
+    const httpExposureError = getHttpServerExposureError(appConfig.server);
+    if (httpExposureError) {
+      throw new Error(httpExposureError);
+    }
 
     this.app = new Hono();
     this.setupMiddleware();
@@ -71,10 +76,10 @@ export class WebServer {
       if (isHttpAuthConfigured(auth)) {
         this.logger.info('HTTP Bearer auth 已启用');
       } else {
-        this.logger.warn('HTTP auth 已要求，但未配置 SAGE_HTTP_TOKEN 或 SAGE_INTERNAL_HTTP_TOKEN');
+        this.logger.error('HTTP auth 已要求，但未配置 SAGE_HTTP_TOKEN 或 SAGE_INTERNAL_HTTP_TOKEN');
       }
     } else {
-      this.logger.warn('HTTP auth 未启用，management/debug/private APIs 将保持裸访问');
+      this.logger.warn('HTTP auth 未启用；仅适合 loopback/local HTTP 访问');
     }
 
     this.app.use('*', createHttpAuthMiddleware(auth));

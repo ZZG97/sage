@@ -1,4 +1,3 @@
-import { FeishuService } from './feishu';
 import { AgentProvider } from '../agent';
 import { FallbackAgentProvider } from '../agent/fallback-provider';
 import type { HistoryStore } from './history-store';
@@ -44,6 +43,7 @@ export class SageCore {
   private slashCommandRuntime: SlashCommandRuntime;
   private isRunning: boolean = false;
   private isDraining: boolean = false;
+  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   // 当前正在执行的 agent run。用于把撤回的用户消息映射到正在跑的任务。
   private activeRuns: Map<string, ActiveRun> = new Map();
@@ -58,7 +58,7 @@ export class SageCore {
   constructor(
     agent: AgentProvider,
     historyStore: HistoryStore,
-    messageGateway: MessageGateway = new FeishuService(appConfig.feishu),
+    messageGateway: MessageGateway,
     options: SageCoreOptions = {},
   ) {
     this.logger = new Logger('SageCore');
@@ -591,17 +591,9 @@ export class SageCore {
       return;
     }
 
-    // 注册信号处理，优雅退出
-    const shutdown = async (signal: string) => {
-      this.logger.info(`收到 ${signal}，开始优雅关闭...`);
-      await this.stop();
-      process.exit(0);
-    };
-    process.on('SIGTERM', () => shutdown('SIGTERM'));
-    process.on('SIGINT', () => shutdown('SIGINT'));
-
     try {
       this.logger.info(`正在启动 Sage (agent: ${this.agent.name})...`);
+      this.isDraining = false;
       await this.agent.initialize();
       await this.messageGateway.start();
       this.isRunning = true;
@@ -615,12 +607,14 @@ export class SageCore {
 
   async stop(): Promise<void> {
     if (!this.isRunning) {
+      this.clearCleanupTask();
       this.logger.warn('服务未在运行');
       return;
     }
 
     try {
       this.logger.info('正在停止 Sage...');
+      this.clearCleanupTask();
 
       // Step 1: 进入 drain 模式，拒绝新消息
       this.isDraining = true;
@@ -663,6 +657,7 @@ export class SageCore {
       await this.messageGateway.stop();
       await this.agent.destroy();
       this.isRunning = false;
+      this.isDraining = false;
       this.logger.info('Sage 已停止');
     } catch (error) {
       this.logger.error('停止服务失败:', error);
@@ -672,7 +667,8 @@ export class SageCore {
   private setupCleanupTask(): void {
     const cleanupInterval = 6 * 60 * 60 * 1000;
 
-    setInterval(async () => {
+    this.clearCleanupTask();
+    this.cleanupTimer = setInterval(async () => {
       try {
         await this.agent.cleanupSessions(MAX_SESSION_AGE);
         this.restoredSessions.clear();
@@ -683,6 +679,12 @@ export class SageCore {
     }, cleanupInterval);
 
     this.logger.info('已设置会话清理任务');
+  }
+
+  private clearCleanupTask(): void {
+    if (!this.cleanupTimer) return;
+    clearInterval(this.cleanupTimer);
+    this.cleanupTimer = null;
   }
 
   getStatus(): {

@@ -38,7 +38,8 @@ bunqueue scheduler
 
 ## Major Components
 
-- `SageCore`: owns provider session routing, queueing, `/stop`, `/clear`, provider switching, proactive agent orchestration, and shutdown/restart lifecycle.
+- `Application` (`src/index.ts`): composition root for provider, gateway, Core, WebServer, and TaskScheduler wiring; owns process-level signal/error handlers and `process.exit`.
+- `SageCore`: owns provider session routing, queueing, `/stop`, `/clear`, provider switching, proactive agent orchestration, and runtime drain/stop state.
 - `AgentTurnRunner`: owns one assistant turn's stream loop, active-run registration/cleanup, response update/complete lifecycle, idle timeout handling, and final session/resume/event persistence callbacks.
 - `ConversationRouter`: owns external message/thread identity lookup, in-memory routing caches, and conversation binding to stable internal `conv_*` IDs.
 - `MessageGateway`: transport-neutral messaging boundary used by Core.
