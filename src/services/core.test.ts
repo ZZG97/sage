@@ -156,6 +156,26 @@ class NewSessionMetadataAgentProvider extends FakeAgentProvider {
   }
 }
 
+class NoResumeNewSessionMetadataAgentProvider extends NewSessionMetadataAgentProvider {
+  override getResumeId(_sessionId: string): string | undefined {
+    return undefined;
+  }
+}
+
+class RestoreFailureNoResumeAgentProvider extends FakeAgentProvider {
+  constructor() {
+    super('restore-fails-no-resume-agent');
+  }
+
+  override async restoreSession(_sessionId: string, _resumeId?: string, _context?: AgentSessionContext): Promise<AgentSession> {
+    throw new Error('restore failed');
+  }
+
+  override getResumeId(_sessionId: string): string | undefined {
+    return undefined;
+  }
+}
+
 const tempDirs: string[] = [];
 const originalRestartEnv = {
   OWNER_OPEN_ID: process.env.OWNER_OPEN_ID,
@@ -474,6 +494,80 @@ describe('SageCore message gateway boundary', () => {
         sessionId: 'fake-fallback-42',
         message: 'after fallback',
       });
+    } finally {
+      historyStore.destroy();
+    }
+  });
+
+  it('clears stale resume id when fallback switches to a session without resume support', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sage-core-test-'));
+    tempDirs.push(dir);
+    const historyStore = new HistoryStore(path.join(dir, 'history.db'), 'test');
+    const conversationId = historyStore.createConversation('new-session-agent', {
+      firstMessageId: 'om_no_resume_fallback_root',
+      openId: 'ou_test',
+      chatId: 'oc_test',
+      chatType: 'p2p',
+    });
+    historyStore.updateAgentSessionId(conversationId, 'legacy-session-with-resume', 'new-session-agent');
+    historyStore.updateResumeId(conversationId, 'stale-resume-id');
+    const agent = new NoResumeNewSessionMetadataAgentProvider();
+    const gateway = new InMemoryMessageGateway();
+    new SageCore(agent, historyStore, gateway);
+
+    try {
+      await gateway.emitMessage(testMessage({
+        text: 'fallback without resume',
+        messageId: 'om_no_resume_fallback_reply',
+        rootId: 'om_no_resume_fallback_root',
+      }));
+
+      const session = historyStore.getSession(conversationId);
+      expect(session?.agent_session_id).toBe('fake-fallback-42');
+      expect(session?.agent_session_provider).toBe('new-session-agent');
+      expect(session?.resume_id).toBeNull();
+    } finally {
+      historyStore.destroy();
+    }
+  });
+
+  it('clears stale resume id when restore fails and the replacement session has no resume id', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sage-core-test-'));
+    tempDirs.push(dir);
+    const historyStore = new HistoryStore(path.join(dir, 'history.db'), 'test');
+    const conversationId = historyStore.createConversation('restore-fails-no-resume-agent', {
+      firstMessageId: 'om_restore_fail_root',
+      openId: 'ou_test',
+      chatId: 'oc_test',
+      chatType: 'p2p',
+    });
+    historyStore.updateAgentSessionId(conversationId, 'legacy-session-with-resume', 'restore-fails-no-resume-agent');
+    historyStore.updateResumeId(conversationId, 'stale-resume-id');
+    const agent = new RestoreFailureNoResumeAgentProvider();
+    const gateway = new InMemoryMessageGateway();
+    new SageCore(agent, historyStore, gateway);
+
+    try {
+      await gateway.emitMessage(testMessage({
+        text: 'replacement after restore failure',
+        messageId: 'om_restore_fail_reply',
+        rootId: 'om_restore_fail_root',
+      }));
+
+      expect(agent.receivedMessages).toEqual([
+        { sessionId: 'fake-1', message: 'replacement after restore failure' },
+      ]);
+      const session = historyStore.getSession(conversationId);
+      expect(session?.agent_session_id).toBe('fake-1');
+      expect(session?.agent_session_provider).toBe('restore-fails-no-resume-agent');
+      expect(session?.resume_id).toBeNull();
+      const updates = gateway.outboundMessages.filter((message) => message.type === 'response_update');
+      expect(updates.at(-1)?.events).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: 'notice',
+          content: expect.stringContaining('历史 provider 会话恢复失败'),
+        }),
+      ]));
     } finally {
       historyStore.destroy();
     }

@@ -240,9 +240,13 @@ export class HistoryStore {
     this.db.run(
       `UPDATE sessions
        SET agent_session_id = ?,
-           agent_session_provider = COALESCE(?, agent_session_provider)
+           agent_session_provider = COALESCE(?, agent_session_provider),
+           resume_id = CASE
+             WHEN agent_session_id IS NOT ? THEN NULL
+             ELSE resume_id
+           END
        WHERE id = ?`,
-      [agentSessionId, agentSessionProvider ?? null, conversationId]
+      [agentSessionId, agentSessionProvider ?? null, agentSessionId, conversationId]
     );
   }
 
