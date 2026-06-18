@@ -626,7 +626,7 @@ function logPendingHistoryDataMigrations(db: Database, logger: Logger): void {
     (legacyEvents?.count ?? 0) +
     (orphanEvents?.count ?? 0);
   if (pending > 0) {
-    logger.warn(
+    logger.info(
       `跳过历史数据迁移: legacySessions=${legacySessions?.count ?? 0}, legacyEvents=${legacyEvents?.count ?? 0}, orphanEvents=${orphanEvents?.count ?? 0}. ` +
       `如需显式迁移，设置 RUN_HISTORY_DATA_MIGRATIONS=1 后单独执行。`
     );

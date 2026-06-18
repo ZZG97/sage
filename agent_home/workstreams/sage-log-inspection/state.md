@@ -10,7 +10,7 @@ title `Sage 日志巡检`, cron `0 10 * * *` Asia/Shanghai. Created 2026-06-10
 through local management API. It runs a read-only shell collection step followed
 by an agent analysis step that must obey this workstream's README/state.
 
-**Last Inspection:** 2026-06-17 10:00 scheduled read-only pass. Checked recent
+**Last Inspection:** 2026-06-18 10:00 scheduled read-only pass. Checked recent
 Operations rows and PM2 `sage` / `sage-dev` logs from the workflow artifact.
 No raw logs were committed.
 
@@ -42,6 +42,9 @@ No raw logs were committed.
   on 2026-06-15 through early 2026-06-16 with entries seen but zero classified;
   later successes resumed through 2026-06-17 08:30. Keep watching recurrence
   before opening a focused RSS reliability fix.
+- RSS AI refresh reliability on 2026-06-18: no newer warning than 2026-06-16
+  00:30 in the 7-day Operations window; latest success was 2026-06-18 08:30.
+  Keep as watch, not active fix, unless warning runs recur.
 - OpenCode provider availability: verify intent before fixing. If OpenCode is
   optional, this may be expected fallback noise; if it is primary, inspect
   service health and provider startup dependency in a normal coding turn.
@@ -52,9 +55,10 @@ No raw logs were committed.
   noise rather than a Sage application failure. Confirmed to originate from the
   Feishu SDK EventDispatcher default logger; Sage now registers the specific
   `bot_p2p_chat_entered` access event as a known no-op handler.
-- HistoryStore legacy migration skip warning appears at startup when explicit
-  migration is disabled. If routine, consider lower level or route out of error
-  log; do not change automatically from this workstream.
+- HistoryStore legacy migration skip notice appears at startup when explicit
+  migration is disabled. Laozhang confirmed lowering the level on 2026-06-18;
+  source now logs it at info level. Runtime logs will reflect this after the
+  next owner-controlled service restart.
 
 **Fix Candidates:**
 - RSS AI batch partial failures: repeated warning runs with new entries but zero
@@ -64,7 +68,8 @@ No raw logs were committed.
   `/apps/debug/databases` failures with SQLite unable to open a database file.
   Current source appears to skip unreadable database files, so first confirm
   whether the running service has that guard loaded; if it does, inspect stale
-  cached handles or incomplete database files. Ask before opening a fix.
+  cached handles or incomplete database files. No recurrence was visible in the
+  2026-06-18 PM2 error/warn tail. Ask before opening a fix.
 
 **Next Step:** Ask Laozhang before opening code changes. If approved, prioritize
 the debug database browser investigation, then RSS AI batch diagnostics if

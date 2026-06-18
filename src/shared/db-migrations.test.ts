@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { describe, expect, it } from 'bun:test';
+import { Logger } from '../utils';
 import { runDatabaseMigrations, runHistoryDataMigrations } from './db-migrations';
 
 function columnNames(db: Database, tableName: string): string[] {
@@ -125,5 +126,33 @@ describe('database migrations', () => {
 
     const event = db.query(`SELECT session_id FROM events`).get() as { session_id: string };
     expect(event.session_id).toBe(conversationId);
+  });
+
+  it('logs skipped explicit history data migrations at info level', () => {
+    const db = new Database(':memory:');
+    runDatabaseMigrations('history', db);
+    db.exec(`
+      INSERT INTO sessions (
+        id, env, provider, started_at, last_active_at
+      ) VALUES (
+        'msg:legacy-first-message', 'test', 'fake-agent', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+      );
+    `);
+
+    const logger = new Logger('DbMigrationsTest');
+    const infoMessages: string[] = [];
+    const warnMessages: string[] = [];
+    logger.info = (message: string) => {
+      infoMessages.push(message);
+    };
+    logger.warn = (message: string) => {
+      warnMessages.push(message);
+    };
+
+    runHistoryDataMigrations(db, { env: 'test', enabled: false, logger });
+
+    expect(warnMessages).toEqual([]);
+    expect(infoMessages).toHaveLength(1);
+    expect(infoMessages[0]).toContain('跳过历史数据迁移');
   });
 });
