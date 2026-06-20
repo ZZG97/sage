@@ -4,14 +4,21 @@ Scheduler is Sage's proactive work engine. Operations is the run ledger that rec
 
 ## Scheduler Scope
 
-`TaskScheduler` owns:
+`TaskScheduler` is the public scheduler façade. It owns:
 
 - Builtin scheduled tasks.
 - Dynamic `message`, `agent`, and `workflow` tasks.
-- Persistent task storage in SQLite.
 - bunqueue registration and worker execution.
 - One-shot and recurring schedules.
-- Basic workflow execution with shell and agent steps.
+- Dispatch into message, agent, and workflow execution.
+
+Scheduler implementation details live under `src/services/scheduler/`:
+
+- `dynamic-task-repository.ts`: `dynamic_tasks` SQLite persistence and row serialization.
+- `workflow-normalizer.ts`: workflow payload validation, normalization, and summary generation.
+- `workflow-runner.ts`: linear workflow execution, run directory layout, result records, and agent prompt context.
+- `workflow-shell-runner.ts`: shell step execution and stdout/stderr/meta artifacts.
+- `scheduler-run-recorder.ts`: Operations run ledger integration.
 
 Dynamic agent and workflow tasks may reuse an existing conversation through `reuseConversationId`.
 
@@ -58,7 +65,7 @@ Scheduler jobs are recorded automatically. Other long-running work should instru
 
 ## Current Gaps
 
-- Workflow execution policy is still embedded in `TaskScheduler`.
+- Workflow execution policy is now split out of `TaskScheduler`, but v1 is still linear only.
 - Shell execution needs stronger cwd, command, output-size, and retry boundaries before broader use.
 - Operations is a ledger, not a full trace timeline.
 - AI log inspection and conversation quality analysis are still future work.
