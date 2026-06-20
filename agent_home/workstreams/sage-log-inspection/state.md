@@ -10,7 +10,7 @@ title `Sage 日志巡检`, cron `0 10 * * *` Asia/Shanghai. Created 2026-06-10
 through local management API. It runs a read-only shell collection step followed
 by an agent analysis step that must obey this workstream's README/state.
 
-**Last Inspection:** 2026-06-18 10:00 scheduled read-only pass. Checked recent
+**Last Inspection:** 2026-06-20 10:00 scheduled read-only pass. Checked recent
 Operations rows and PM2 `sage` / `sage-dev` logs from the workflow artifact.
 No raw logs were committed.
 
@@ -42,9 +42,17 @@ No raw logs were committed.
   on 2026-06-15 through early 2026-06-16 with entries seen but zero classified;
   later successes resumed through 2026-06-17 08:30. Keep watching recurrence
   before opening a focused RSS reliability fix.
-- RSS AI refresh reliability on 2026-06-18: no newer warning than 2026-06-16
-  00:30 in the 7-day Operations window; latest success was 2026-06-18 08:30.
-  Keep as watch, not active fix, unless warning runs recur.
+- RSS AI refresh reliability on 2026-06-19: warning recurrence appeared at
+  2026-06-18 22:30 with feeds and new entries present but zero classified, plus
+  failed AI batches. The 7-day window still shows more successes than warnings,
+  and the latest success was 2026-06-19 08:30. Keep as active watch; open a
+  focused RSS AI diagnostics/fix turn only after Laozhang confirms.
+- RSS AI refresh reliability on 2026-06-20: warning count remains high in the
+  7-day window, but latest warning is still 2026-06-18 22:30 and latest success
+  is 2026-06-20 08:30. Keep as active watch; do not open code changes without
+  Laozhang confirmation.
+- PM2 prod/dev error tails were quiet on 2026-06-20 inspection. No new runtime
+  log pattern from bounded PM2 evidence.
 - OpenCode provider availability: verify intent before fixing. If OpenCode is
   optional, this may be expected fallback noise; if it is primary, inspect
   service health and provider startup dependency in a normal coding turn.

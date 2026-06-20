@@ -34,6 +34,7 @@ user_invocable: true
 - Default to portfolio id `default` for real personal holdings. Use `test-*` only when explicitly testing.
 - If the API returns 404/connection refused while `PORT` is set, explain that the current running Sage instance may not have loaded the investment app yet; do not fall back to another Sage instance unless the user explicitly targets it.
 - Do not give buy/sell instructions. Summaries should focus on current positions, market value, weight, missing cost data, and data-source limitations.
+- For 新易盛 specifically, if its weight is high in Laozhang's portfolio, describe the risk as passive high weight caused by A-share lot-size granularity and high share price, not as intentional heavy concentration or strong bullish intent; still report its portfolio volatility impact clearly.
 - If cost basis is missing, state that unrealized PnL cannot be computed.
 - If the user provides a stock name without a code and the code is not obvious, verify it before importing. Do not guess ambiguous tickers.
 
