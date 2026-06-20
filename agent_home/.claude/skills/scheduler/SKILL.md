@@ -50,7 +50,7 @@ user_invocable: true
   - `message` — 到点直接发一条飞书纯文本。便宜、快，适合"提醒我吃药""30分钟后叫我起床"这种静态提醒。
   - `agent` — 到点触发一次完整的 agent 对话，结果以**流式卡片**形式发送（和用户主动对话体验一致，能看到思考/工具调用过程）。适合"每天早上帮我汇总 GitHub notifications""每周五生成工作总结"这种需要实时计算或联网的任务。默认每次执行创建独立 session；如 body 带 `reuseConversationId`，则复用对应 conversation/session 并把卡片发回原话题。
   - `workflow` — 一个调度任务内顺序执行多个 step，目前只支持线性 `shell` / `agent` steps。适合"先拉数据，再让 agent 总结"这类任务；比如 RSS 先跑抓取脚本，再让 agent 基于产物输出摘要。
-- `message`（非 workflow 时必填）：kind=message 时为文本内容；kind=agent 时作为喂给 agent 的 prompt（也可用 `prompt` 字段，两者等价）；kind=workflow 时可作为任务摘要，不填则后端会根据 steps 自动生成。
+- `message`（非 workflow 时必填）：kind=message 时为文本内容；kind=agent 时作为喂给 agent 的 prompt（请求里也可用 `prompt` 字段，API 会归一化写入 `message`；响应不会保留单独 `prompt` 字段）；kind=workflow 时可作为任务摘要，不填则后端会根据 steps 自动生成。
 - `workflow`：仅 kind=workflow 时使用。`steps` 目前只支持：
   - `shell` step：`command` 必填，可选 `cwd` / `timeoutSec`
   - `agent` step：`prompt` 必填，可选 `title`
